@@ -1,0 +1,16 @@
+{
+  "name": "x-reader",
+  "version": "1.0.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:check": "node scripts/build.mjs --check",
+    "test": "npm run build:check && node --check dist/x-reader.user.js && node --test tests/*.test.cjs tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "linkedom": "^0.18.13"
+  }
+}

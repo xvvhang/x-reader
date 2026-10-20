@@ -1,0 +1,89 @@
+# X Reader
+
+A Tampermonkey userscript that extracts content from X home and search pages and presents it in an independent Shadow DOM interface, without relying on X's native layout.
+
+The application and Tampermonkey display name is **X Reader**. Package and file identifiers retain `x-reader`.
+
+## Installation and upgrades
+
+1. Install and enable Tampermonkey.
+2. Create a userscript, or edit your existing copy, and replace its contents with [dist/x-reader.user.js](./dist/x-reader.user.js). Save the script. The [root copy](./x-reader.user.js) is identical and remains available for existing links.
+3. Disable any older copies and refresh <https://x.com/home>. Reader is enabled by default on a fresh installation.
+4. Use the floating **Origin / Reader** control at the bottom center to switch views, or press **Alt + Shift + R**.
+
+If the script does not run in Chrome or Edge, check the extension's site permissions and the browser's **Allow user scripts** setting.
+
+On GitHub, use the **Raw** version of `dist/x-reader.user.js` when installing directly. Do not install individual files from `src/`.
+
+The first public version is **1.0.0**. Earlier development builds used higher version numbers, so Tampermonkey may not offer 1.0.0 as an automatic upgrade. Replace the contents of the existing script manually when moving from a development build.
+
+## Features
+
+- **Independent home feed:** home and search navigation, timeline tabs, and a compact numbered list. Uses X's blue accent and follows the system light or dark theme.
+- Reads the available native home tabs, preserving For you, Following, and custom list entries.
+- Displays posts in collection order with five-line previews, author details, timestamps, engagement counts, and original-post links. The expand control appears only when text is actually truncated and is rechecked after viewport or font changes.
+- Author details include an avatar, display name, `@username`, and a verification badge only when one exists in the original author's header. Delayed avatar and badge updates are synchronized.
+- Image and video thumbnails appear below the text. Images load lazily and open in an in-page viewer. Close it with Escape, the close button, or a click on the backdrop. Closing stops video playback.
+- Videos can play in the viewer when the source page provides a reusable `video.twimg.com` URL. Blob or streaming-only sources fall back to a poster and an original-post playback link. Delayed posters and source URLs are synchronized.
+- Quotes are displayed directly without folding. Link cards open in the original post.
+- Automatically attempts to load the next batch, with a manual **Load more** option. Results are deduplicated by post or user identity, with a limit of 1,000 entries per collection.
+- **Independent search:** use the search navigation or enter a query in the search box. Supports Top, Latest, People, Photos, and Videos, along with native X search syntax such as `from:alice`, hashtags, and quoted phrases.
+- People results show avatars, display names, verification, usernames, and available biographies. Media search also supports recognizable original-post link grids. Missing author details or text are not fetched separately.
+- Photo search uses a three-column square-thumbnail grid. Video search uses two-column 16:9 previews instead of numbered text rows. Multiple images from the same post form a collage with individually clickable thumbnails. Smaller screens use fewer columns.
+- Search supports pagination, deduplication, empty results, and native loading-error detection. Submitting a query or changing a filter navigates to the corresponding X search URL; Reader activates after the page reloads. New queries preserve the current filter.
+- Loading messages, the load-more button, and the explanatory footer are centered with consistent spacing.
+- **Automatic interface language:** Chinese X interfaces, including Simplified and Traditional Chinese language tags, use Chinese; all other interface languages use English. Detection prefers the page's `lang` attribute and falls back to native navigation labels, not browser or post language. Runtime changes update navigation, filters, buttons, status messages, timestamps, media notices, and accessibility labels. Posts, author names, and custom list names are not translated.
+- Author links, content links, and original posts open in new tabs. Likes, replies, and posting are not implemented in Reader; use the original post to interact.
+- **Alt + Shift + R** switches views. The selected mode is saved automatically.
+- An opaque, iOS-style **Origin / Reader** segmented control floats at the bottom center. Its slider moves to the selected option. There is no glass effect or full-width bottom bar, and clicks outside the control pass through. Extra space at the end of the list keeps the final entry accessible. Supports keyboard arrow navigation, system themes, and reduced-motion preferences.
+
+## How it works and limitations
+
+The native X home or search page remains underneath Reader, visually hidden but retaining its layout and data loading. The script reads already-loaded content and rebuilds it using safe text nodes and links. It does not copy native HTML, call private APIs, or upload data. Home tabs trigger their native counterparts. Loading more scrolls the underlying page without changing the Reader's scroll position.
+
+You must be signed in, and the native page must load successfully. Reader does not bypass search restrictions, access controls, or rate limits. X can change its DOM, advertisement markers, or virtual scrolling behavior, so extraction and pagination are not guaranteed to work indefinitely. Only loaded text is available; posts truncated by X must be opened in the original view. Engagement counts are snapshots taken during extraction.
+
+Switching to Origin restores the native page and the scroll position saved when Reader was activated. Only `/home` and `/search` use the independent interface; other pages keep their native layout. Colors follow the system theme.
+
+Local syntax and DOM tests are included; the current implementation has not been verified against a real signed-in account by automated browser tests. If content, tab switching, or pagination fails, switch to Origin first to check the native page.
+
+## Development and maintenance
+
+Source files are separate from the installable userscript:
+
+```text
+src/
+  x-adapter.js        Native X selectors, extraction, navigation, and loading
+  reader.js           Reader interface, rendering, and application state
+  i18n.js             UI messages and translation helpers
+  userscript.meta.js  Tampermonkey metadata and release version
+scripts/
+  build.mjs           Bundles the source into standalone userscripts
+tests/
+  home.test.cjs       Regression tests against the generated userscript
+  x-adapter.test.mjs  Adapter contracts and architecture checks
+  fixtures/x/        Synthetic native-page fixtures
+dist/
+  x-reader.user.js    Generated installable userscript
+x-reader.user.js      Generated compatibility copy, identical to dist/
+```
+
+Edit `src/`, not the generated userscripts. Native X selectors and extraction rules belong in `src/x-adapter.js`; Reader consumes normalized data rather than native DOM nodes. See [Maintenance](./docs/maintenance.md) for the adapter contract and repair workflow.
+
+For development:
+
+```sh
+npm ci
+npm run build
+npm test
+```
+
+`npm run build` generates both installation paths using esbuild, without runtime dependencies or remote imports. `npm run build:check` verifies that the committed outputs match the source. `npm test` checks generated files, validates the bundled script's syntax, and runs both UI regressions and adapter tests. Rebuild after source changes before running tests.
+
+The existing storage key, namespace, and user-facing behavior are preserved by this refactor. When upgrading from the former `x-reader` display name, edit the existing Tampermonkey entry or disable the old copy to avoid duplicate execution. Installing the userscript does not require Node.js or the development dependencies.
+
+Chinese UI translations and multilingual test fixtures are intentionally retained. Project documentation, source comments, and test descriptions are written in English.
+
+## License
+
+Licensed under the [MIT License](./LICENSE).
