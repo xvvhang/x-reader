@@ -59,7 +59,7 @@ SOFTWARE.
     badge: ['[data-testid="icon-verified"]', '[aria-label="Verified account"], [aria-label="Verified Account"], [aria-label="已认证账号"], [aria-label="认证账号"]'],
     avatars: ['[data-testid="Tweet-User-Avatar"] img, [data-testid^="UserAvatar-Container"] img'],
     text: ['[data-testid="tweetText"]'],
-    photos: ['[data-testid="tweetPhoto"] img'],
+    photos: ['[data-testid="tweetPhoto"] img, a[href*="/status/"][href*="/photo/"] img, img[src*="//pbs.twimg.com/media/"], img[srcset*="//pbs.twimg.com/media/"]'],
     videoContainers: ['[data-testid="videoPlayer"], [data-testid="videoComponent"]'],
     backgroundImages: ['[style*="background-image"]'],
     description: ['[data-testid="UserDescription"]'],
@@ -116,6 +116,15 @@ SOFTWARE.
     const one = (key, scope = document2) => all(key, scope)[0] || null;
     const closest = (key, node) => node?.closest(rules[key].join(", ")) || null;
     const primary = () => one("primary");
+    function imageSource(img) {
+      if (!img) return null;
+      const candidates = [
+        img.currentSrc,
+        img.getAttribute("src"),
+        ...(img.getAttribute("srcset") || "").split(",").map((entry) => entry.trim().split(/\s+/)[0])
+      ];
+      return candidates.filter(Boolean).map((src) => url(src, true)).find(Boolean) || null;
+    }
     function readableText(node) {
       if (!node) return "";
       if (node.nodeType === 3) return node.textContent;
@@ -183,31 +192,43 @@ SOFTWARE.
       }
       body?.childNodes.forEach(walk);
       const media = [];
-      const seen = /* @__PURE__ */ new Set();
+      const quoteMedia = [];
+      let quoteRoot = closest("quoteScope", quote);
+      const seen = /* @__PURE__ */ new Map([[media, /* @__PURE__ */ new Set()], [quoteMedia, /* @__PURE__ */ new Set()]]);
+      function mediaGroup(node) {
+        const root = closest("quoteScope", node);
+        if (root && article.contains(root)) {
+          quoteRoot ||= root;
+          return quoteMedia;
+        }
+        return media;
+      }
       for (const img of all("photos", article)) {
         if (closest("videoContainers", img)) continue;
-        const src = url(img.src, true);
-        if (src && !seen.has(src)) {
-          seen.add(src);
-          media.push({ kind: "image", src, alt: img.alt || "" });
+        const src = imageSource(img);
+        const group = mediaGroup(img);
+        if (src && !seen.get(group).has(src)) {
+          seen.get(group).add(src);
+          group.push({ kind: "image", src, alt: img.alt || "" });
         }
       }
       for (const container of all("videoContainers", article).filter((node) => !closest("videoContainers", node.parentElement))) {
         const video = one("video", container);
-        let poster = url(video?.getAttribute("poster") || one("images", container)?.getAttribute("src") || "", true);
+        let poster = url(video?.getAttribute("poster") || "", true) || imageSource(one("images", container));
         if (!poster) for (const node of all("backgroundImages", container)) {
           const match = node.style.backgroundImage?.match(/url\(["']?(.*?)["']?\)/);
           poster = match && url(match[1], true);
           if (poster) break;
         }
         const sources = [video?.currentSrc, video?.getAttribute("src"), ...all("sources", container).map((node) => node.getAttribute("src"))];
-        media.push({ kind: "video", src: sources.map(videoURL).find(Boolean) || null, poster, alt: "" });
+        mediaGroup(container).push({ kind: "video", src: sources.map(videoURL).find(Boolean) || null, poster, alt: "" });
       }
       const metrics = [];
       for (const [selector, key] of [["reply", "replies"], ["repost", "reposts"], ["like", "likes"]]) {
         const count = one(selector, article)?.textContent.trim();
         if (count) metrics.push({ count, key });
       }
+      const quoteHref = quoteRoot?.getAttribute("href") || one("statusLinks", quoteRoot)?.getAttribute("href");
       return {
         id,
         url: href,
@@ -216,6 +237,8 @@ SOFTWARE.
         time: time?.textContent || "",
         tokens,
         quote: readableText(quote),
+        quoteMedia,
+        quoteURL: quoteHref ? url(quoteHref) : null,
         media,
         metrics,
         context: one("context", article)?.textContent || "",
@@ -242,7 +265,7 @@ SOFTWARE.
       const href = url(card.getAttribute("href"));
       const match = href && new URL(href).pathname.match(/^\/([a-zA-Z0-9_]{1,15})\/status\/(\d+)/);
       if (!match || one("promoted", card)) return null;
-      const images = all("images", card).map((img) => ({ src: url(img.src, true), alt: img.alt || "" })).filter((img) => img.src && !/\/profile_images\//.test(img.src));
+      const images = all("images", card).map((img) => ({ src: imageSource(img), alt: img.alt || "" })).filter((img) => img.src && !/\/profile_images\//.test(img.src));
       const video = one("video", card);
       const media = state.filter === "video" ? [{
         kind: "video",
@@ -273,7 +296,10 @@ SOFTWARE.
       const scope = primary();
       if (state.kind === "search" && state.filter === "user") return all("people", scope);
       const nodes = all("posts", scope);
-      if (state.kind === "search" && ["image", "video"].includes(state.filter)) nodes.push(...all("statusLinks", scope).filter((node) => !closest("mediaCardExclude", node) && (one("video", node) || all("images", node).some((img) => url(img.src, true) && !/\/profile_images\//.test(img.src)))));
+      if (state.kind === "search" && ["image", "video"].includes(state.filter)) nodes.push(...all("statusLinks", scope).filter((node) => !closest("mediaCardExclude", node) && (one("video", node) || all("images", node).some((img) => {
+        const src = imageSource(img);
+        return src && !/\/profile_images\//.test(src);
+      }))));
       return nodes;
     }
     function snapshot(state = pageState()) {
@@ -314,15 +340,17 @@ SOFTWARE.
     function observe(callback) {
       const content = new Observer(callback);
       const language = new Observer(callback);
-      content.observe(document2.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-selected", "poster", "src"] });
+      content.observe(document2.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-selected", "poster", "src", "srcset", "sizes"] });
       language.observe(document2.documentElement, { attributes: true, attributeFilter: ["lang"] });
       document2.addEventListener("loadedmetadata", callback, true);
+      document2.addEventListener("load", callback, true);
       window2.addEventListener("popstate", callback);
       return () => {
         content.disconnect();
         language.disconnect();
         document2.removeEventListener("loadedmetadata", callback, true);
         window2.removeEventListener("popstate", callback);
+        document2.removeEventListener("load", callback, true);
       };
     }
     return {
@@ -618,6 +646,36 @@ SOFTWARE.
       if (data.bio) content.append(el("div", "bio", data.bio));
       item.append(content);
       return item;
+    }, renderMedia = function(data) {
+      const mediaRow = el("div", "media");
+      for (const [index, media] of data.media.entries()) {
+        const thumbnail = el("button", "thumbnail");
+        thumbnail.type = "button";
+        translatedAttribute(thumbnail, "aria-label", media.kind === "video" ? "enlargeVideo" : "enlargeImage", { index: index + 1 });
+        thumbnail.setAttribute("aria-haspopup", "dialog");
+        const src = media.kind === "image" ? adapter.imageURL(media.src, "small") : media.poster;
+        if (src) {
+          const img = el("img");
+          img.loading = "lazy";
+          img.src = src;
+          if (media.alt) img.alt = media.alt;
+          else translatedAttribute(img, "alt", media.kind === "video" ? "videoThumb" : "imageAlt");
+          img.addEventListener("error", () => {
+            img.hidden = true;
+            thumbnail.append(el("span", "fallback", msg("previewError")));
+          }, { once: true });
+          thumbnail.append(img);
+        } else thumbnail.append(el("span", "fallback", msg("video")));
+        if (media.kind === "video") thumbnail.append(el("span", "play", "▶"));
+        thumbnail.addEventListener("click", () => openViewer(media, data, thumbnail));
+        mediaRow.append(thumbnail);
+      }
+      return mediaRow;
+    }, renderQuote = function(data) {
+      if (!data.quote && !data.quoteMedia?.length) return null;
+      const quote = el("blockquote", "quote", data.quote || "");
+      if (data.quoteMedia?.length) quote.append(renderMedia({ ...data, media: data.quoteMedia, url: data.quoteURL || data.url }));
+      return quote;
     }, renderEntry = function(data, index) {
       const item = el("li", "item");
       item.dataset.id = data.id;
@@ -630,32 +688,7 @@ SOFTWARE.
       }
       if (!data.tokens.length) text2.append(link(msg(data.media.some((media) => media.kind === "video") ? "videoPost" : data.media.length ? "imagePost" : "quotePost"), data.url));
       content.append(text2);
-      if (data.media.length) {
-        const mediaRow = el("div", "media");
-        for (const [index2, media] of data.media.entries()) {
-          const thumbnail = el("button", "thumbnail");
-          thumbnail.type = "button";
-          translatedAttribute(thumbnail, "aria-label", media.kind === "video" ? "enlargeVideo" : "enlargeImage", { index: index2 + 1 });
-          thumbnail.setAttribute("aria-haspopup", "dialog");
-          const src = media.kind === "image" ? adapter.imageURL(media.src, "small") : media.poster;
-          if (src) {
-            const img = el("img");
-            img.loading = "lazy";
-            img.src = src;
-            if (media.alt) img.alt = media.alt;
-            else translatedAttribute(img, "alt", media.kind === "video" ? "videoThumb" : "imageAlt");
-            img.addEventListener("error", () => {
-              img.hidden = true;
-              thumbnail.append(el("span", "fallback", msg("previewError")));
-            }, { once: true });
-            thumbnail.append(img);
-          } else thumbnail.append(el("span", "fallback", msg("video")));
-          if (media.kind === "video") thumbnail.append(el("span", "play", "▶"));
-          thumbnail.addEventListener("click", () => openViewer(media, data, thumbnail));
-          mediaRow.append(thumbnail);
-        }
-        content.append(mediaRow);
-      }
+      if (data.media.length) content.append(renderMedia(data));
       const meta = el("div", "meta");
       meta.append(renderAuthor(data));
       const time = link(data.time || msg("original"), data.url);
@@ -688,10 +721,8 @@ SOFTWARE.
         expand.hidden = true;
         text2._readerExpand = expand;
       }
-      if (data.quote) {
-        const quote = el("blockquote", "quote", data.quote);
-        content.append(quote);
-      }
+      const quote = renderQuote(data);
+      if (quote) content.append(quote);
       if (data.card) meta.append(link(msg("card"), data.url));
       content.append(meta);
       item.append(content);
@@ -882,13 +913,26 @@ SOFTWARE.
             if (item?.classList.contains("media-card")) {
               item.replaceWith(renderMediaEntry({ ...previous, media: data.media }));
             } else {
-              const oldRow = item?.querySelector(".media");
-              const newRow = renderEntry(data, 0).querySelector(".media");
+              const oldRow = item?.querySelector(":scope > div > .media");
+              const newRow = data.media.length ? renderMedia(data) : null;
               if (oldRow && newRow) oldRow.replaceWith(newRow);
               else if (oldRow) oldRow.remove();
               else if (newRow) item?.querySelector(".text").after(newRow);
             }
             previous.media = data.media;
+          }
+          if (!data.person && (previous.quote !== data.quote || previous.quoteURL !== data.quoteURL || JSON.stringify(previous.quoteMedia) !== JSON.stringify(data.quoteMedia))) {
+            const item = list.querySelector(`[data-id="${data.id}"]`);
+            if (item?.classList.contains("item")) {
+              const oldQuote = item.querySelector(".quote");
+              const newQuote = renderQuote(data);
+              if (oldQuote && newQuote) oldQuote.replaceWith(newQuote);
+              else if (oldQuote) oldQuote.remove();
+              else if (newQuote) item.querySelector(".meta").before(newQuote);
+            }
+            previous.quote = data.quote;
+            previous.quoteMedia = data.quoteMedia;
+            previous.quoteURL = data.quoteURL;
           }
           continue;
         }

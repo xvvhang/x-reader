@@ -32,7 +32,7 @@ Create an adapter with `createXAdapter({ document, window, location })`. Tests m
 | `installReaderStyles()` / `setReaderActive(active)` | Installs source visibility rules and switches them on or off. |
 | `observe(callback)` | Observes native changes; returns a cleanup function. |
 
-Post entries retain the existing shape: `id`, `url`, author identity, timestamp, text tokens, quote text, media, engagement metrics, and context. People entries have `person: true` and a biography. Grid-derived media entries have `grid: true`; missing metadata is not invented or fetched separately.
+Post entries include `id`, `url`, author identity, timestamp, text tokens, quote text, media, engagement metrics, and context. `media` belongs to the outer post; `quoteMedia` contains media inside the quoted post, and `quoteURL` is its original-post link when available. These groups stay separate even when they share an image URL. People entries have `person: true` and a biography. Grid-derived media entries have `grid: true`; missing metadata is not invented or fetched separately.
 
 `sourceIds` identify native node lifetimes without exposing DOM nodes. They remain stable while a source node is mounted and change after remounting, even if the same post returns. Reader uses them with the signature to avoid mixing stale content into a new timeline or search.
 

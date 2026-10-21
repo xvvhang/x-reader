@@ -36,6 +36,21 @@ test('returns normalized post data and opaque source identities without exposing
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), snapshot);
 });
 
+test('separates parent and quoted media into normalized groups', () => {
+  const html = fixture.replace('Second line</div></div>', `Second line</div>
+    <a href="/bob/status/456">Quoted post</a>
+    <div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/quoted.jpg"></div>
+    <div data-testid="videoPlayer"><video poster="https://pbs.twimg.com/media/quoted-video.jpg" src="https://video.twimg.com/quoted.mp4"></video></div>
+  </div>`);
+  const post = setup({ html }).adapter.snapshot().items[0];
+  assert.equal(post.media.length, 1);
+  assert.equal(post.media[0].src, 'https://pbs.twimg.com/media/example.jpg');
+  assert.equal(post.quoteMedia.length, 2);
+  assert.equal(post.quoteMedia[0].src, 'https://pbs.twimg.com/media/quoted.jpg');
+  assert.equal(post.quoteMedia[1].kind, 'video');
+  assert.equal(post.quoteURL, 'https://x.com/bob/status/456');
+});
+
 test('uses ordered primary-column and article fallbacks after native markup changes', () => {
   const html = fixture.replace('data-testid="primaryColumn"', 'role="main"').replace('data-testid="tweet"', 'role="article"');
   assert.equal(setup({ html }).adapter.snapshot().items[0].id, '123');
@@ -80,6 +95,26 @@ test('rejects promoted posts and unsafe media URLs', () => {
   assert.equal(safeURL('https://example.com/a.jpg', true, 'https://x.com'), null);
 });
 
+test('reads currentSrc and responsive photo sources while rejecting unsafe source candidates', () => {
+  const h = setup();
+  const img = h.document.querySelector('[data-testid="tweetPhoto"] img');
+  img.setAttribute('src', 'data:image/gif;base64,AAAA');
+  img.setAttribute('srcset', 'https://example.com/tracker.jpg 1x, https://pbs.twimg.com/media/responsive.jpg 2x');
+  assert.equal(h.adapter.snapshot().items[0].media[0].src, 'https://pbs.twimg.com/media/responsive.jpg');
+  Object.defineProperty(img, 'currentSrc', { configurable: true, value: 'https://pbs.twimg.com/media/selected.jpg' });
+  assert.equal(h.adapter.snapshot().items[0].media[0].src, 'https://pbs.twimg.com/media/selected.jpg');
+  Object.defineProperty(img, 'currentSrc', { value: 'https://example.com/tracker.jpg' });
+  img.setAttribute('srcset', 'javascript:alert(1) 1x');
+  assert.equal(h.adapter.snapshot().items[0].media.length, 0);
+});
+
+test('discovers responsive-only media search cards', () => {
+  const h = setup({ pathname: '/search', search: '?q=photos&f=image', html: `<html><body><main data-testid="primaryColumn">
+    <a href="/alice/status/123/photo/1"><img srcset="https://pbs.twimg.com/media/responsive.jpg 1x"></a>
+  </main></body></html>` });
+  assert.equal(h.adapter.snapshot().items[0].media[0].src, 'https://pbs.twimg.com/media/responsive.jpg');
+});
+
 test('detects stale native search input without accepting results for another query', () => {
   const h = setup({ pathname: '/search', search: '?q=new&f=live', html: fixture.replace('<article', '<input data-testid="SearchBox_Search_Input" value="old"><article') });
   assert.equal(h.adapter.snapshot().searchMatches, false);
@@ -114,17 +149,22 @@ test('observes native changes and releases observers and listeners on cleanup', 
   let notifications = 0;
   const adapter = createXAdapter({ ...h, MutationObserver: class {
     constructor(callback) { this.callback = callback; observers.push(this); }
-    observe() {}
+    observe(target, options) { this.options = options; }
     disconnect() { this.disconnected = true; }
   } });
   const stop = adapter.observe(() => notifications++);
+  assert.ok(observers[0].options.attributeFilter.includes('srcset'));
+  assert.ok(observers[0].options.attributeFilter.includes('sizes'));
   observers[0].callback(); observers[1].callback();
   h.window.dispatchEvent(new h.window.Event('popstate'));
   assert.equal(notifications, 3);
+  h.document.dispatchEvent(new h.window.Event('load'));
+  assert.equal(notifications, 4);
   stop();
   assert.equal(observers.every((observer) => observer.disconnected), true);
   h.window.dispatchEvent(new h.window.Event('popstate'));
-  assert.equal(notifications, 3);
+  h.document.dispatchEvent(new h.window.Event('load'));
+  assert.equal(notifications, 4);
 });
 
 test('keeps the UI module independent of native X selectors and document queries', () => {

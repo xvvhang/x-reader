@@ -18,7 +18,7 @@ export const X_SELECTORS = Object.freeze({
   badge: ['[data-testid="icon-verified"]', '[aria-label="Verified account"], [aria-label="Verified Account"], [aria-label="已认证账号"], [aria-label="认证账号"]'],
   avatars: ['[data-testid="Tweet-User-Avatar"] img, [data-testid^="UserAvatar-Container"] img'],
   text: ['[data-testid="tweetText"]'],
-  photos: ['[data-testid="tweetPhoto"] img'],
+  photos: ['[data-testid="tweetPhoto"] img, a[href*="/status/"][href*="/photo/"] img, img[src*="//pbs.twimg.com/media/"], img[srcset*="//pbs.twimg.com/media/"]'],
   videoContainers: ['[data-testid="videoPlayer"], [data-testid="videoComponent"]'],
   backgroundImages: ['[style*="background-image"]'],
   description: ['[data-testid="UserDescription"]'],
@@ -70,6 +70,13 @@ export function createXAdapter({ document, window, location, MutationObserver: O
   const one = (key, scope = document) => all(key, scope)[0] || null;
   const closest = (key, node) => node?.closest(rules[key].join(', ')) || null;
   const primary = () => one('primary');
+  function imageSource(img) {
+    if (!img) return null;
+    // Responsive images may expose only srcset until the browser selects a source.
+    const candidates = [img.currentSrc, img.getAttribute('src'),
+      ...(img.getAttribute('srcset') || '').split(',').map((entry) => entry.trim().split(/\s+/)[0])];
+    return candidates.filter(Boolean).map((src) => url(src, true)).find(Boolean) || null;
+  }
   function readableText(node) {
     if (!node) return '';
     if (node.nodeType === 3) return node.textContent;
@@ -135,32 +142,45 @@ export function createXAdapter({ document, window, location, MutationObserver: O
     }
     body?.childNodes.forEach(walk);
     const media = [];
-    const seen = new Set();
+    const quoteMedia = [];
+    let quoteRoot = closest('quoteScope', quote);
+    const seen = new Map([[media, new Set()], [quoteMedia, new Set()]]);
+    function mediaGroup(node) {
+      const root = closest('quoteScope', node);
+      if (root && article.contains(root)) {
+        quoteRoot ||= root;
+        return quoteMedia;
+      }
+      return media;
+    }
     for (const img of all('photos', article)) {
       if (closest('videoContainers', img)) continue;
-      const src = url(img.src, true);
-      if (src && !seen.has(src)) {
-        seen.add(src); media.push({ kind: 'image', src, alt: img.alt || '' });
+      const src = imageSource(img);
+      const group = mediaGroup(img);
+      if (src && !seen.get(group).has(src)) {
+        seen.get(group).add(src); group.push({ kind: 'image', src, alt: img.alt || '' });
       }
     }
     for (const container of all('videoContainers', article).filter((node) => !closest('videoContainers', node.parentElement))) {
       const video = one('video', container);
-      let poster = url(video?.getAttribute('poster') || one('images', container)?.getAttribute('src') || '', true);
+      let poster = url(video?.getAttribute('poster') || '', true) || imageSource(one('images', container));
       if (!poster) for (const node of all('backgroundImages', container)) {
         const match = node.style.backgroundImage?.match(/url\(["']?(.*?)["']?\)/);
         poster = match && url(match[1], true);
         if (poster) break;
       }
       const sources = [video?.currentSrc, video?.getAttribute('src'), ...all('sources', container).map((node) => node.getAttribute('src'))];
-      media.push({ kind: 'video', src: sources.map(videoURL).find(Boolean) || null, poster, alt: '' });
+      mediaGroup(container).push({ kind: 'video', src: sources.map(videoURL).find(Boolean) || null, poster, alt: '' });
     }
     const metrics = [];
     for (const [selector, key] of [['reply', 'replies'], ['repost', 'reposts'], ['like', 'likes']]) {
       const count = one(selector, article)?.textContent.trim();
       if (count) metrics.push({ count, key });
     }
+    const quoteHref = quoteRoot?.getAttribute('href') || one('statusLinks', quoteRoot)?.getAttribute('href');
     return { id, url: href, ...extractAuthor(article, author, one('links', author)), datetime: time?.getAttribute('datetime') || '', time: time?.textContent || '',
-      tokens, quote: readableText(quote), media, metrics, context: one('context', article)?.textContent || '', card: Boolean(one('card', article)) };
+      tokens, quote: readableText(quote), quoteMedia, quoteURL: quoteHref ? url(quoteHref) : null,
+      media, metrics, context: one('context', article)?.textContent || '', card: Boolean(one('card', article)) };
   }
   function extractPerson(cell) {
     const links = all('links', cell).filter((node) => {
@@ -182,7 +202,7 @@ export function createXAdapter({ document, window, location, MutationObserver: O
     const href = url(card.getAttribute('href'));
     const match = href && new URL(href).pathname.match(/^\/([a-zA-Z0-9_]{1,15})\/status\/(\d+)/);
     if (!match || one('promoted', card)) return null;
-    const images = all('images', card).map((img) => ({ src: url(img.src, true), alt: img.alt || '' })).filter((img) => img.src && !/\/profile_images\//.test(img.src));
+    const images = all('images', card).map((img) => ({ src: imageSource(img), alt: img.alt || '' })).filter((img) => img.src && !/\/profile_images\//.test(img.src));
     const video = one('video', card);
     const media = state.filter === 'video' ? [{ kind: 'video', src: [video?.currentSrc, video?.getAttribute('src'), one('sources', video)?.getAttribute('src')].map(videoURL).find(Boolean) || null,
       poster: url(video?.getAttribute('poster') || '', true) || images[0]?.src || null, alt: '' }] : images.map((img) => ({ kind: 'image', ...img }));
@@ -194,7 +214,7 @@ export function createXAdapter({ document, window, location, MutationObserver: O
     if (state.kind === 'search' && state.filter === 'user') return all('people', scope);
     const nodes = all('posts', scope);
     if (state.kind === 'search' && ['image', 'video'].includes(state.filter)) nodes.push(...all('statusLinks', scope).filter((node) => !closest('mediaCardExclude', node) &&
-      (one('video', node) || all('images', node).some((img) => url(img.src, true) && !/\/profile_images\//.test(img.src)))));
+      (one('video', node) || all('images', node).some((img) => { const src = imageSource(img); return src && !/\/profile_images\//.test(src); }))));
     return nodes;
   }
   function snapshot(state = pageState()) {
@@ -231,13 +251,15 @@ export function createXAdapter({ document, window, location, MutationObserver: O
   function observe(callback) {
     const content = new Observer(callback);
     const language = new Observer(callback);
-    content.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-selected', 'poster', 'src'] });
+    content.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-selected', 'poster', 'src', 'srcset', 'sizes'] });
     language.observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
     document.addEventListener('loadedmetadata', callback, true);
+    document.addEventListener('load', callback, true);
     window.addEventListener('popstate', callback);
     return () => {
       content.disconnect(); language.disconnect();
       document.removeEventListener('loadedmetadata', callback, true); window.removeEventListener('popstate', callback);
+      document.removeEventListener('load', callback, true);
     };
   }
   return {
