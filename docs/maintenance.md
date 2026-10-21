@@ -14,6 +14,8 @@
 
 `src/i18n.js` translates UI message descriptors. It does not inspect native markup or translate user content. The adapter reports language as `zh` or `en`.
 
+`src/media.js` owns URL-based media identities and incremental merging, without DOM access. `src/image-loader.js` owns generic image recovery, sharing retry budgets across rerenders and cleaning up detached image jobs. Neither module inspects native X markup.
+
 ## Adapter contract
 
 Create an adapter with `createXAdapter({ document, window, location })`. Tests may inject selector overrides and a `MutationObserver` constructor without changing production code.
@@ -26,7 +28,7 @@ Create an adapter with `createXAdapter({ document, window, location })`. Tests m
 | `snapshot(state)` | Returns normalized entries, opaque source IDs, a source signature, native tabs, health, a message key, and query readiness. |
 | `fullText(post)` | On demand, requests same-origin public post HTML without credentials and returns safe text tokens for the matching post, or null. |
 | `activateTab(key)` | Finds the current native tab and clicks it; returns false if it no longer exists. |
-| `loadMore()` | Scrolls the native page to request more content. |
+| `loadMore()` | Advances the source page by at most 75% of a viewport and returns `{ moved, atEnd }`; never jumps to the document end or scrolls backwards. Reader schedules and cancels a bounded sequence of steps. |
 | `scrollPosition()` / `restoreScroll(position)` | Reads or restores source-page scrolling, independently of Reader scrolling. |
 | `searchURL(query, filter)` / `navigate(url)` | Encodes search URLs and navigates the source page. |
 | `imageURL(src, size)` | Builds X image thumbnail or viewer URLs. |
@@ -34,6 +36,17 @@ Create an adapter with `createXAdapter({ document, window, location })`. Tests m
 | `observe(callback)` | Observes native changes; returns a cleanup function. |
 
 Post entries include `id`, `url`, author identity, timestamp, text tokens, quote text, media, engagement metrics, and context. `media` belongs to the outer post; `quoteMedia` contains media inside the quoted post, and `quoteURL` is its original-post link when available. These groups stay separate even when they share an image URL. People entries have `person: true` and a biography. Grid-derived media entries have `grid: true`; missing metadata is not invented or fetched separately.
+
+### Media observations and retention
+
+- Each attachment has a stable `key`, `ownerId`, and optional explicit `order`. Image keys ignore format and size renditions of the same `pbs.twimg.com/media/` asset. Video slots use native video positions where available, otherwise their observed index within the owning post's video group.
+- `quoteId` and `quoteURL` come from recognizable original-post references in quote containers, including `data-href`. Explicit quote frames (or frames with both author and post text) can hold provisional quoted media before their identity links mount, with a null owner rather than the parent's identity. A generic clickable wrapper alone is not enough to establish a quoted post. Fixtures testing known quote ownership must include an identifiable referenced post.
+- `mediaState` and `quoteMediaState` describe the current observation as `unknown` or `partial`. The DOM does not establish an authoritative complete/empty/deleted attachment list; do not infer those states from missing nodes.
+- Within each collection and owner group, merge observations rather than replacing arrays. Retain known media, playable video sources, posters, and nonempty alt text when a later observation lacks them. Preserve first-seen order unless all positions are explicit. A different recognized `quoteId` starts a new quoted-media group. Resetting the feed clears media retention and image retry budgets.
+- Background photos must be inside a native photo region and use a safe media URL. Ignore avatars, post-text emoji, link cards, and video poster regions when collecting photos. Changes to inline styles and link identities are observed.
+- Image recovery allows two retries per owner/media/view-size key, prefers the native original URL after a generated rendition fails, and does not reset its budget when a row rerenders. Removed images and closed viewers cancel pending recovery timers.
+
+Reader waits 500 ms between overlapping source scroll steps (1 second at the end), allowing each intermediate viewport to be collected. An attempt stops after new results have settled for that interval, a route/tab/mode change, a source error, 12 steps, or 10 seconds. All timers are cancelled on completion/reset. This improves opportunities to observe lazy media; it does not guarantee compatibility with every virtual-list implementation.
 
 `sourceIds` identify native node lifetimes without exposing DOM nodes. They remain stable while a source node is mounted and change after remounting, even if the same post returns. Reader uses them with the signature to avoid mixing stale content into a new timeline or search.
 

@@ -29,12 +29,19 @@ function setup({ pathname = '/home', search = '', lang = 'zh-CN', fetch, content
   const scrolls = [];
   const assignments = [];
   const storage = new Map();
+  const timers = new Map();
+  let clock = 0;
+  let timerId = 0;
+  const later = (fn, delay = 0) => { const id = ++timerId; timers.set(id, { fn, at: clock + delay }); return id; };
+  const cancel = (id) => timers.delete(id);
   window.scrollY = 42;
+  window.innerHeight = 800;
+  Object.defineProperty(document.documentElement, 'scrollHeight', { value: 20000, configurable: true });
   window.fetch = fetch;
   window.AbortController = AbortController;
-  window.setTimeout = () => 1;
-  window.clearTimeout = () => {};
-  window.scrollTo = (...args) => scrolls.push(args);
+  window.setTimeout = later;
+  window.clearTimeout = cancel;
+  window.scrollTo = (...args) => { scrolls.push(args); window.scrollY = typeof args[0] === 'object' ? args[0].top : args[1]; };
   const context = vm.createContext({
     window, document, Node: window.Node, Element: window.Element, URL, URLSearchParams, console,
     location: { origin: 'https://x.com', pathname, search, assign: (url) => assignments.push(url) },
@@ -45,15 +52,26 @@ function setup({ pathname = '/home', search = '', lang = 'zh-CN', fetch, content
     MutationObserver: class { constructor(fn) { observers.push(fn); } observe() {} },
     IntersectionObserver: class { observe() {} },
     setInterval: () => 1,
-    setTimeout: () => 1,
-    clearTimeout: () => {},
+    setTimeout: later,
+    clearTimeout: cancel,
   });
   vm.runInContext(script, context);
   const flush = () => { while (frames.length) frames.shift()(); };
   const notify = () => { observers.forEach((fn) => fn()); flush(); };
+  const advance = (ms) => {
+    const end = clock + ms;
+    let count = 0;
+    while (true) {
+      const next = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      if (++count > 200) throw new Error('Unbounded timer loop');
+      clock = next[1].at; timers.delete(next[0]); next[1].fn(); flush();
+    }
+    clock = end;
+  };
   flush();
   return {
-    window, document, scrolls, assignments, notify, flush, location: context.location,
+    window, document, scrolls, assignments, notify, flush, advance, timers, location: context.location,
     ui: document.querySelector('#x-reader-app').shadowRoot,
     nativeTabs: document.querySelectorAll('[role="tab"]'),
     feed: document.querySelector('#feed'),
@@ -121,7 +139,7 @@ test('keeps a quoted post image separate from the quoting post image, including 
   assert.equal(h.ui.querySelector('.viewer-content a').href, 'https://x.com/bob/status/99');
 });
 
-test('keeps delayed quote-only media separate when parent media is added and removed', () => {
+test('retains collected parent and quote media across partial native snapshots', () => {
   const h = setup({ content: tweet('1').replace('</article>', `
     <div role="link" tabindex="0"><a href="/bob/status/99">Quoted post</a>
       <div data-testid="tweetPhoto"><img></div>
@@ -135,13 +153,144 @@ test('keeps delayed quote-only media separate when parent media is added and rem
   h.feed.querySelector('[data-testid="tweetPhoto"]').remove();
   h.notify();
   assert.equal(h.ui.querySelectorAll('.quote .thumbnail').length, 2);
-  assert.equal(h.ui.querySelectorAll('.item > div > .media').length, 0);
+  assert.equal(h.ui.querySelectorAll('.item > div > .media .thumbnail').length, 1);
   h.feed.querySelector('article').insertAdjacentHTML('afterbegin', '<div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/new.jpg"></div>');
   h.notify();
-  assert.equal(h.ui.querySelectorAll('.item > div > .media .thumbnail').length, 1);
+  assert.equal(h.ui.querySelectorAll('.item > div > .media .thumbnail').length, 2);
   assert.equal(h.ui.querySelectorAll('.quote .thumbnail').length, 2);
   assert.equal(h.ui.querySelector('.text'), body);
   assert.equal(body.classList.contains('clamped'), false);
+});
+
+test('retains images across native node remounts and deduplicates image renditions in photo order', () => {
+  const h = setup({ content: tweet('1').replace('https://pbs.twimg.com/media/example.jpg', 'https://pbs.twimg.com/media/example?format=jpg&name=small') });
+  h.feed.innerHTML = tweet('1').replace('https://pbs.twimg.com/media/example.jpg', 'https://pbs.twimg.com/media/example?format=webp&name=large');
+  h.notify();
+  assert.equal(h.ui.querySelectorAll('.thumbnail').length, 1);
+  h.feed.querySelector('[data-testid="tweetPhoto"]').remove();
+  h.notify();
+  assert.equal(h.ui.querySelectorAll('.thumbnail').length, 1);
+  h.feed.innerHTML = tweet('1').replace('<div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/example.jpg" alt="示例"></div>', `
+    <a href="/alice/status/1/photo/2"><img src="https://pbs.twimg.com/media/second.jpg"></a>
+    <a href="/alice/status/1/photo/1"><img src="https://pbs.twimg.com/media/example.jpg"></a>`);
+  h.notify();
+  const images = [...h.ui.querySelectorAll('.thumbnail img')];
+  assert.equal(images.length, 2);
+  assert.match(images[0].src, /example/);
+  assert.match(images[1].src, /second/);
+});
+
+test('does not classify an ordinary clickable photo as quoted media', () => {
+  const h = setup({ content: tweet('1').replace('<div data-testid="tweetPhoto">', '<div role="link" tabindex="0" data-testid="tweetPhoto">') });
+  assert.equal(h.ui.querySelectorAll('.item > div > .media .thumbnail').length, 1);
+  assert.equal(h.ui.querySelector('.quote'), null);
+});
+
+test('retries failed thumbnails with original URLs and stops after a bounded number of failures', () => {
+  const h = setup({ content: tweet('1') });
+  const img = h.ui.querySelector('.thumbnail img');
+  const fail = () => img.dispatchEvent(new h.window.Event('error'));
+  fail();
+  h.advance(1000);
+  assert.equal(img.src, 'https://pbs.twimg.com/media/example.jpg');
+  img.dispatchEvent(new h.window.Event('load'));
+  assert.equal(img.hidden, false);
+  assert.equal(h.ui.querySelector('.thumbnail .fallback'), null);
+  fail(); h.advance(2000); fail(); h.advance(20000);
+  assert.equal(img.hidden, true);
+  assert.equal(h.ui.querySelectorAll('.thumbnail .fallback').length, 1);
+  const src = img.src;
+  h.notify(); h.advance(20000);
+  assert.equal(img.src, src);
+  assert.equal(h.timers.size, 0);
+});
+
+test('cancels pending image retries when the collection is reset', () => {
+  const h = setup({ content: tweet('1') });
+  const img = h.ui.querySelector('.thumbnail img');
+  img.dispatchEvent(new h.window.Event('error'));
+  const src = img.src;
+  h.ui.querySelectorAll('.tabs button')[1].click();
+  h.flush(); h.advance(2000);
+  assert.equal(img.src, src);
+});
+
+test('does not renew an exhausted retry budget when another media item rerenders the row', () => {
+  const h = setup({ content: tweet('1') });
+  const img = h.ui.querySelector('.thumbnail img');
+  for (let i = 0; i < 3; i++) { img.dispatchEvent(new h.window.Event('error')); h.advance(1000); }
+  h.feed.querySelector('article').insertAdjacentHTML('beforeend', '<div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/second.jpg"></div>');
+  h.notify();
+  const replacement = h.ui.querySelector('.thumbnail img');
+  assert.notEqual(replacement, img);
+  assert.equal(replacement.hidden, true);
+  assert.equal(replacement.getAttribute('src'), null);
+  h.advance(10000);
+  assert.equal(h.timers.size, 0);
+});
+
+test('cancels viewer image recovery after the viewer closes', () => {
+  const h = setup({ content: tweet('1') });
+  h.ui.querySelector('.thumbnail').click();
+  const img = h.ui.querySelector('.viewer img');
+  img.dispatchEvent(new h.window.Event('error'));
+  const src = img.src;
+  h.ui.querySelector('.viewer-close').click();
+  h.advance(2000);
+  assert.equal(img.src, src);
+  assert.equal(h.timers.size, 0);
+});
+
+test('preserves quoted media through unmounts but resets it for a different quoted post', () => {
+  const quoted = (id, name) => `<div role="link" tabindex="0"><a href="/bob/status/${id}">Quoted post</a><div data-testid="tweetText">Quote ${id}</div><div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/${name}.jpg"></div></div>`;
+  const h = setup({ content: tweet('1').replace('</article>', `${quoted('99', 'quoted')}</article>`) });
+  h.feed.querySelector('[role="link"]').remove();
+  h.notify();
+  assert.equal(h.ui.querySelectorAll('.quote .thumbnail').length, 1);
+  h.feed.querySelector('article').insertAdjacentHTML('beforeend', quoted('100', 'different'));
+  h.notify();
+  assert.equal(h.ui.querySelectorAll('.quote .thumbnail').length, 1);
+  assert.match(h.ui.querySelector('.quote img').src, /different/);
+  h.ui.querySelector('.quote .thumbnail').click();
+  assert.match(h.ui.querySelector('.viewer-content a').href, /status\/100$/);
+});
+
+test('steps through the source timeline and cancels loading on mode changes or timeout', () => {
+  const h = setup();
+  h.ui.querySelector('.viewport').scrollTop = 123;
+  h.ui.querySelector('.more').click();
+  const first = h.scrolls.at(-1)[0].top;
+  assert.ok(first > 42 && first <= 842);
+  h.advance(500);
+  assert.ok(h.scrolls.at(-1)[0].top > first);
+  assert.equal(h.ui.querySelector('.viewport').scrollTop, 123);
+  h.ui.querySelector('.mode-tab[data-mode="x"]').click(); h.flush();
+  const count = h.scrolls.length;
+  h.advance(20000);
+  assert.equal(h.scrolls.length, count);
+  const stalled = setup();
+  stalled.ui.querySelector('.more').click();
+  stalled.advance(20000);
+  assert.equal(stalled.ui.querySelector('.more').disabled, false);
+  assert.ok(stalled.scrolls.length <= 12);
+  assert.equal(stalled.timers.size, 0);
+});
+
+test('stops source scrolling before a new route or native tab can receive stale collection steps', () => {
+  for (const change of ['route', 'tab']) {
+    const h = setup();
+    h.ui.querySelector('.more').click();
+    const count = h.scrolls.length;
+    if (change === 'route') h.location.pathname = '/search';
+    else {
+      h.nativeTabs[0].setAttribute('aria-selected', 'false');
+      h.nativeTabs[1].setAttribute('aria-selected', 'true');
+    }
+    h.advance(1000);
+    assert.equal(h.scrolls.length, count);
+    assert.equal(h.ui.querySelector('.more').disabled, false);
+    assert.equal(h.timers.size, 0);
+  }
 });
 
 test('synchronizes delayed native body text without collapsing it or changing scroll position', () => {
@@ -215,6 +364,7 @@ test('loads more by scrolling the source page while preserving the Reader positi
   h.feed.insertAdjacentHTML('beforeend', tweet('3'));
   h.notify();
   assert.equal(h.ui.querySelectorAll('.item').length, 3);
+  h.advance(1000);
   assert.equal(h.ui.querySelector('.more').disabled, false);
   assert.equal(h.ui.querySelector('.viewport').scrollTop, 123);
 });
@@ -344,6 +494,7 @@ test('displays quotes directly without folding controls or the five-line body li
   const h = setup();
   h.feed.insertAdjacentHTML('beforeend', tweet('3', '外层正文').replace('</article>', `
     <div role="link" tabindex="0">
+      <a href="/quoted/status/99">Quoted post</a>
       <div data-testid="User-Name"><a href="/quoted">引用作者</a><svg data-testid="icon-verified"></svg></div>
       <div data-testid="tweetText">引用原文第一行<br>第二行</div>
     </div></article>`));

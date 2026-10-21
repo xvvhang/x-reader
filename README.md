@@ -25,9 +25,12 @@ The first public version is **1.0.0**. Earlier development builds used higher ve
 - For posts truncated by X itself, Expand attempts to retrieve the full text from the public original-post page without account credentials. If that page does not provide the text, an original-post link is shown instead. Later native text updates are also synchronized without collapsing expanded posts.
 - Author details include an avatar, display name, `@username`, and a verification badge only when one exists in the original author's header. Delayed avatar and badge updates are synchronized.
 - Image and video thumbnails appear below the text. Images load lazily and open in an in-page viewer. Close it with Escape, the close button, or a click on the backdrop. Closing stops video playback.
+- Collected media survives partial snapshots and native-node remounts. Image renditions are deduplicated, explicit photo positions determine order when available, and quoted-post media stays in its own group. Background photos are recognized only in native photo regions, not arbitrary page backgrounds or link cards.
+- Failed thumbnails and viewer images retry at most twice per media item and view size within a collection, using the native original URL as a fallback. Rerendering does not renew the retry budget; resetting the collection does. Closed or removed images do not keep retrying.
 - Videos can play in the viewer when the source page provides a reusable `video.twimg.com` URL. Blob or streaming-only sources fall back to a poster and an original-post playback link. Delayed posters and source URLs are synchronized.
 - Quotes are displayed directly without folding. Link cards open in the original post.
 - Automatically attempts to load the next batch, with a manual **Load more** option. Results are deduplicated by post or user identity, with a limit of 1,000 entries per collection.
+- Loading more uses overlapping source-page scroll steps, with pauses for delayed content. Each attempt stops on new results, a route/tab/mode change, a native loading error, 12 steps, or a 10-second timeout. Reader's scroll position remains independent.
 - **Independent search:** use the search navigation or enter a query in the search box. Supports Top, Latest, People, Photos, and Videos, along with native X search syntax such as `from:alice`, hashtags, and quoted phrases.
 - People results show avatars, display names, verification, usernames, and available biographies. Media search also supports recognizable original-post link grids. Missing author details or text are not fetched separately.
 - Photo search uses a three-column square-thumbnail grid. Video search uses two-column 16:9 previews instead of numbered text rows. Multiple images from the same post form a collage with individually clickable thumbnails. Smaller screens use fewer columns.
@@ -44,6 +47,8 @@ The native X home or search page remains underneath Reader, visually hidden but 
 
 You must be signed in, and the native page must load successfully. Reader does not bypass search restrictions, access controls, or rate limits. X can change its DOM, advertisement markers, or virtual scrolling behavior, so extraction and pagination are not guaranteed to work indefinitely. Full-text expansion depends on the public post page supplying recognizable text; private, restricted, or otherwise unavailable posts must be opened in the original view. Engagement counts are snapshots taken during extraction.
 
+An absent media node is not treated as an authoritative deletion: previously collected images remain until the collection is reset. DOM observations cannot prove that every attachment has been seen. This version does not read timeline network responses or fetch missing media from post detail pages.
+
 Switching to Origin restores the native page and the scroll position saved when Reader was activated. Only `/home` and `/search` use the independent interface; other pages keep their native layout. Colors follow the system theme.
 
 Local syntax and DOM tests are included; the current implementation has not been verified against a real signed-in account by automated browser tests. If content, tab switching, or pagination fails, switch to Origin first to check the native page.
@@ -57,12 +62,15 @@ src/
   x-adapter.js        Native X selectors, extraction, navigation, and loading
   reader.js           Reader interface, rendering, and application state
   i18n.js             UI messages and translation helpers
+  media.js            Stable media identities and incremental merging
+  image-loader.js     Bounded image recovery and retry cleanup
   userscript.meta.js  Tampermonkey metadata and release version
 scripts/
   build.mjs           Bundles the source into standalone userscripts
 tests/
   home.test.cjs       Regression tests against the generated userscript
   x-adapter.test.mjs  Adapter contracts and architecture checks
+  media.test.mjs      Media identity, ordering, and merge regressions
   fixtures/x/        Synthetic native-page fixtures
 dist/
   x-reader.user.js    Generated installable userscript

@@ -1,3 +1,5 @@
+import { imageKey, mergeMedia } from './media.js';
+
 // Native X DOM contracts belong here, not in the Reader UI.
 // Alternatives are ordered: use the first selector that has matches.
 export const X_SELECTORS = Object.freeze({
@@ -21,6 +23,8 @@ export const X_SELECTORS = Object.freeze({
   detailText: ['[data-testid="tweetText"]', '[dir="auto"].whitespace-pre-wrap'],
   showMore: ['[data-testid="tweet-text-show-more-link"]'],
   photos: ['[data-testid="tweetPhoto"] img, a[href*="/status/"][href*="/photo/"] img, img[src*="//pbs.twimg.com/media/"], img[srcset*="//pbs.twimg.com/media/"]'],
+  photoRegions: ['[data-testid="tweetPhoto"], a[href*="/status/"][href*="/photo/"]'],
+  photoExclude: ['[data-testid="Tweet-User-Avatar"], [data-testid^="UserAvatar-Container"], [data-testid="User-Name"], [data-testid="tweetText"], [data-testid="card.wrapper"], [data-testid="videoPlayer"], [data-testid="videoComponent"]'],
   videoContainers: ['[data-testid="videoPlayer"], [data-testid="videoComponent"]'],
   backgroundImages: ['[style*="background-image"]'],
   description: ['[data-testid="UserDescription"]'],
@@ -29,7 +33,8 @@ export const X_SELECTORS = Object.freeze({
   card: ['[data-testid="card.wrapper"]'],
   promoted: ['[data-testid="promotedIndicator"]'],
   ad: ['[data-testid="placementTracking"]'],
-  quoteScope: ['[role="link"][tabindex="0"]'],
+  quoteScope: ['[data-testid="quoteTweet"], [data-slot="embedded-tweet-frame"], [role="link"][tabindex="0"]'],
+  quoteFrames: ['[data-testid="quoteTweet"], [data-slot="embedded-tweet-frame"]'],
   mediaCardExclude: ['article, [data-testid="placementTracking"]'],
   bioExclude: ['a, button, [data-testid="User-Name"]'],
   interactive: ['a, button'],
@@ -79,6 +84,46 @@ export function createXAdapter({ document, window, location, MutationObserver: O
       ...(img.getAttribute('srcset') || '').split(',').map((entry) => entry.trim().split(/\s+/)[0])];
     return candidates.filter(Boolean).map((src) => url(src, true)).find(Boolean) || null;
   }
+  function reference(value) {
+    const href = value && url(value);
+    if (!href || new URL(href).origin !== location.origin) return null;
+    const match = new URL(href).pathname.match(/^\/([\w]{1,15})\/status\/(\d+)(?:\/(photo|video)\/(\d+))?\/?$/);
+    return match ? { id: match[2], url: `${location.origin}/${match[1]}/status/${match[2]}`, type: match[3], order: match[4] ? Number(match[4]) : null } : null;
+  }
+  function quoteReference(root, parentId) {
+    const candidates = [root.getAttribute('data-href'), root.getAttribute('href'), ...all('statusLinks', root).map((node) => node.getAttribute('href'))];
+    return candidates.map(reference).find((ref) => ref && ref.id !== parentId) || null;
+  }
+  function quoteFor(node, article, parentId) {
+    let root = closest('quoteScope', node);
+    while (root && root !== article && article.contains(root)) {
+      const ref = quoteReference(root, parentId);
+      if (ref) return { root, ...ref };
+      // Explicit quote frames can mount their media before the referenced-post link.
+      // Keep that media out of the parent's group without inventing a post identity.
+      if (root.matches(rules.quoteFrames.join(', ')) || (one('author', root) && one('text', root))) return { root, id: null, url: null };
+      root = closest('quoteScope', root.parentElement);
+    }
+    return null;
+  }
+  function backgroundSource(node) {
+    const style = node.style.backgroundImage || '';
+    for (const match of style.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/g)) {
+      const src = url((match[1] ?? match[2] ?? match[3]).trim(), true);
+      if (src) return src;
+    }
+    return null;
+  }
+  function photoNodes(scope) {
+    const backgrounds = all('backgroundImages', scope);
+    if (scope?.matches(rules.backgroundImages.join(', '))) backgrounds.unshift(scope);
+    return [...new Set([...all('photos', scope), ...backgrounds.filter((node) => closest('photoRegions', node))])]
+      .filter((node) => !closest('photoExclude', node));
+  }
+  function photoSource(node) {
+    const src = node.tagName === 'IMG' ? imageSource(node) : backgroundSource(node);
+    return src && new URL(src).pathname.startsWith('/media/') ? src : null;
+  }
   function readableText(node) {
     if (!node) return '';
     if (node.nodeType === 3) return node.textContent;
@@ -124,56 +169,60 @@ export function createXAdapter({ document, window, location, MutationObserver: O
   }
   function extractPost(article) {
     if (closest('ad', article) || one('promoted', article)) return null;
-    const time = one('time', article);
+    const time = all('time', article).find((node) => node.closest('article') === article && !closest('quoteScope', node));
     const href = url(closest('links', time)?.getAttribute('href') || '');
     const id = href?.match(/\/status\/(\d+)/)?.[1];
     if (!id) return null;
     const author = one('author', article);
     const texts = all('text', article);
-    const body = texts.find((node) => !closest('quoteScope', node)) || null;
-    const quote = texts.find((node) => node !== body);
+    const body = texts.find((node) => !quoteFor(node, article, id)) || null;
+    const quote = texts.find((node) => quoteFor(node, article, id));
     const tokens = textTokens(body);
-    const truncated = all('showMore', article).some((node) => !closest('quoteScope', node));
+    const truncated = all('showMore', article).some((node) => !quoteFor(node, article, id));
     const media = [];
     const quoteMedia = [];
-    let quoteRoot = closest('quoteScope', quote);
-    const seen = new Map([[media, new Set()], [quoteMedia, new Set()]]);
+    let quoted = quoteFor(quote, article, id);
+    quoted ||= all('quoteScope', article).map((root) => quoteFor(root, article, id)).find(Boolean);
     function mediaGroup(node) {
-      const root = closest('quoteScope', node);
-      if (root && article.contains(root)) {
-        quoteRoot ||= root;
+      const info = quoteFor(node, article, id);
+      if (info) {
+        quoted ||= info;
         return quoteMedia;
       }
       return media;
     }
-    for (const img of all('photos', article)) {
-      if (closest('videoContainers', img)) continue;
-      const src = imageSource(img);
-      const group = mediaGroup(img);
-      if (src && !seen.get(group).has(src)) {
-        seen.get(group).add(src); group.push({ kind: 'image', src, alt: img.alt || '' });
-      }
+    for (const node of photoNodes(article)) {
+      const src = photoSource(node);
+      if (!src) continue;
+      const group = mediaGroup(node);
+      const ownerId = group === quoteMedia ? quoted.id : id;
+      const ref = reference(closest('links', node)?.getAttribute('href'));
+      if (ref && ref.id !== ownerId) continue;
+      group.push({ kind: 'image', key: imageKey(src), ownerId, order: ref?.type === 'photo' ? ref.order : null, src, alt: node.alt || '' });
     }
     for (const container of all('videoContainers', article).filter((node) => !closest('videoContainers', node.parentElement))) {
       const video = one('video', container);
       let poster = url(video?.getAttribute('poster') || '', true) || imageSource(one('images', container));
       if (!poster) for (const node of all('backgroundImages', container)) {
-        const match = node.style.backgroundImage?.match(/url\(["']?(.*?)["']?\)/);
-        poster = match && url(match[1], true);
+        poster = backgroundSource(node);
         if (poster) break;
       }
       const sources = [video?.currentSrc, video?.getAttribute('src'), ...all('sources', container).map((node) => node.getAttribute('src'))];
-      mediaGroup(container).push({ kind: 'video', src: sources.map(videoURL).find(Boolean) || null, poster, alt: '' });
+      const group = mediaGroup(container);
+      const ref = reference(closest('links', container)?.getAttribute('href'));
+      const slot = ref?.type === 'video' ? ref.order : group.filter((entry) => entry.kind === 'video').length + 1;
+      group.push({ kind: 'video', key: `video:${slot}`, ownerId: group === quoteMedia ? quoted.id : id, order: ref?.type === 'video' ? ref.order : null,
+        src: sources.map(videoURL).find(Boolean) || null, poster, alt: '' });
     }
     const metrics = [];
     for (const [selector, key] of [['reply', 'replies'], ['repost', 'reposts'], ['like', 'likes']]) {
       const count = one(selector, article)?.textContent.trim();
       if (count) metrics.push({ count, key });
     }
-    const quoteHref = quoteRoot?.getAttribute('href') || one('statusLinks', quoteRoot)?.getAttribute('href');
     return { id, url: href, ...extractAuthor(article, author, one('links', author)), datetime: time?.getAttribute('datetime') || '', time: time?.textContent || '',
-      tokens, truncated, quote: readableText(quote), quoteMedia, quoteURL: quoteHref ? url(quoteHref) : null,
-      media, metrics, context: one('context', article)?.textContent || '', card: Boolean(one('card', article)) };
+      tokens, truncated, quote: readableText(quote), quoteMedia: mergeMedia([], quoteMedia), quoteId: quoted?.id || null, quoteURL: quoted?.url || null,
+      media: mergeMedia([], media), mediaState: media.length ? 'partial' : 'unknown', quoteMediaState: quoteMedia.length ? 'partial' : 'unknown',
+      metrics, context: one('context', article)?.textContent || '', card: Boolean(one('card', article)) };
   }
   function textTokens(body) {
     const tokens = [];
@@ -203,10 +252,10 @@ export function createXAdapter({ document, window, location, MutationObserver: O
       const detail = new window.DOMParser().parseFromString(await response.text(), 'text/html');
       for (const article of detail.querySelectorAll('article')) {
         const identity = all('statusLinks', article).some((node) => node.closest('article') === article &&
-          !closest('quoteScope', node) && url(node.getAttribute('href'))?.split('?')[0] === href);
+          !quoteFor(node, article, post.id) && url(node.getAttribute('href'))?.split('?')[0] === href);
         if (!identity) continue;
-        const body = all('detailText', article).find((node) => node.closest('article') === article && !closest('quoteScope', node));
-        if (!body || all('showMore', article).some((node) => !closest('quoteScope', node)) || body.querySelector('button')) return null;
+        const body = all('detailText', article).find((node) => node.closest('article') === article && !quoteFor(node, article, post.id));
+        if (!body || all('showMore', article).some((node) => !quoteFor(node, article, post.id)) || body.querySelector('button')) return null;
         const tokens = textTokens(body);
         return tokens.length ? { tokens } : null;
       }
@@ -236,17 +285,20 @@ export function createXAdapter({ document, window, location, MutationObserver: O
     if (!match || one('promoted', card)) return null;
     const images = all('images', card).map((img) => ({ src: imageSource(img), alt: img.alt || '' })).filter((img) => img.src && !/\/profile_images\//.test(img.src));
     const video = one('video', card);
-    const media = state.filter === 'video' ? [{ kind: 'video', src: [video?.currentSrc, video?.getAttribute('src'), one('sources', video)?.getAttribute('src')].map(videoURL).find(Boolean) || null,
-      poster: url(video?.getAttribute('poster') || '', true) || images[0]?.src || null, alt: '' }] : images.map((img) => ({ kind: 'image', ...img }));
+    const ref = reference(card.getAttribute('href'));
+    const media = state.filter === 'video' ? [{ kind: 'video', key: `video:${ref?.type === 'video' ? ref.order : 1}`, ownerId: match[2], order: ref?.type === 'video' ? ref.order : null,
+      src: [video?.currentSrc, video?.getAttribute('src'), one('sources', video)?.getAttribute('src')].map(videoURL).find(Boolean) || null,
+      poster: url(video?.getAttribute('poster') || '', true) || images[0]?.src || null, alt: '' }] : photoNodes(card).map((node) => ({ kind: 'image', src: photoSource(node), alt: node.alt || '' }))
+        .filter((img) => img.src).map((img) => ({ ...img, key: imageKey(img.src), ownerId: match[2], order: ref?.type === 'photo' ? ref.order : null }));
     return { id: match[2], url: href, author: match[1], username: `@${match[1]}`, authorURL: `${location.origin}/${match[1]}`,
-      avatar: null, verified: '', datetime: '', time: '', tokens: [], quote: '', media, metrics: [], context: '', card: false, grid: true };
+      avatar: null, verified: '', datetime: '', time: '', tokens: [], quote: '', media: mergeMedia([], media), mediaState: media.length ? 'partial' : 'unknown', metrics: [], context: '', card: false, grid: true };
   }
   function sourceNodes(state) {
     const scope = primary();
     if (state.kind === 'search' && state.filter === 'user') return all('people', scope);
     const nodes = all('posts', scope);
     if (state.kind === 'search' && ['image', 'video'].includes(state.filter)) nodes.push(...all('statusLinks', scope).filter((node) => !closest('mediaCardExclude', node) &&
-      (one('video', node) || all('images', node).some((img) => { const src = imageSource(img); return src && !/\/profile_images\//.test(src); }))));
+      (one('video', node) || photoNodes(node).some(photoSource) || (state.filter === 'video' && all('images', node).some((img) => { const src = imageSource(img); return src && !/\/profile_images\//.test(src); })))));
     return nodes;
   }
   function snapshot(state = pageState()) {
@@ -283,7 +335,7 @@ export function createXAdapter({ document, window, location, MutationObserver: O
   function observe(callback) {
     const content = new Observer(callback);
     const language = new Observer(callback);
-    content.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-selected', 'poster', 'src', 'srcset', 'sizes'] });
+    content.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-selected', 'poster', 'src', 'srcset', 'sizes', 'style', 'data-href', 'href'] });
     language.observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
     document.addEventListener('loadedmetadata', callback, true);
     document.addEventListener('load', callback, true);
@@ -306,7 +358,14 @@ export function createXAdapter({ document, window, location, MutationObserver: O
     },
     scrollPosition() { return window.scrollY; },
     restoreScroll(position) { window.scrollTo(0, position); },
-    loadMore() { window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' }); },
+    loadMore() {
+      const height = window.innerHeight || 800;
+      const position = window.scrollY;
+      const end = Math.max(0, (document.documentElement.scrollHeight || position + height * 2) - height);
+      const top = Math.min(end, position + Math.max(1, Math.floor(height * .75)));
+      if (top > position) window.scrollTo({ top, behavior: 'instant' });
+      return { moved: top > position, atEnd: top >= end };
+    },
     searchURL(query, filter = '') { return `/search?q=${encodeURIComponent(query)}&src=typed_query${filter ? `&f=${encodeURIComponent(filter)}` : ''}`; },
     navigate(href) { location.assign(href); },
     imageURL(src, size) { const image = new URL(src); image.searchParams.set('name', size); return image.href; },
