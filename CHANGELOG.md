@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- Recognize additional post-image markup and responsive image sources.
+- Synchronize images that load after the initial extraction.
+- Keep quoted-post images and videos separate from the quoting post's media, including delayed updates.
+
 ## 1.0.0
 
 Initial public release:

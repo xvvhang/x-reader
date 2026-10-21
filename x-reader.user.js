@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Reader
 // @namespace    https://local.invalid/x-reader
-// @version      1.0.0
+// @version      1.0.1
 // @license      MIT
 // @description  An independent, compact X home and search interface with filters, media previews, and people search.
 // @match        https://x.com/*
