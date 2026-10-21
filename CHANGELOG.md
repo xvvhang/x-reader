@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3
+
+- Retain collected media across partial DOM snapshots and native-node remounts; deduplicate image renditions and preserve explicit photo ordering.
+- Identify quoted media by referenced post identity rather than generic clickable wrappers alone.
+- Extract scoped background photos while excluding avatars, emoji, link cards, and video posters.
+- Recover failed thumbnails and viewer images with bounded retries and native original-URL fallback.
+- Replace jump-to-bottom loading with cancellable, overlapping scroll steps, a step limit, and a timeout.
+
 ## 1.0.2
 
 - Synchronize delayed native post text without resetting expanded state.

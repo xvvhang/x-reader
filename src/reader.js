@@ -1,5 +1,7 @@
 import { createXAdapter, safeURL } from './x-adapter.js';
 import { createI18n } from './i18n.js';
+import { mergeMedia } from './media.js';
+import { createImageLoader } from './image-loader.js';
 
 // Reader owns presentation and state; only the adapter reads or controls native X DOM.
 {
@@ -172,12 +174,15 @@ import { createI18n } from './i18n.js';
   const status = $('.status');
   const more = $('.more');
   const entries = new Map();
+  const imageLoader = createImageLoader({ setTimeout, clearTimeout });
   let active = false;
   let currentTab = '';
   let pending = null;
   let frame = 0;
   let loading = false;
   let loadTimer = 0;
+  let loadStepTimer = 0;
+  let loadRun = null;
   let switchTimer = 0;
   let savedScroll = 0;
   let viewerTrigger = null;
@@ -263,6 +268,7 @@ import { createI18n } from './i18n.js';
     }
     viewer.hidden = true;
     $('.viewer-content').replaceChildren();
+    imageLoader.prune();
     viewport.style.overflow = '';
     if (viewerTrigger?.isConnected) viewerTrigger.focus();
     viewerTrigger = null;
@@ -285,10 +291,12 @@ import { createI18n } from './i18n.js';
       content.append(video);
     } else if (media.kind === 'image' || media.poster) {
       const img = el('img');
-      img.src = media.kind === 'image' ? adapter.imageURL(media.src, 'large') : media.poster;
       if (media.alt) img.alt = media.alt;
       else translatedAttribute(img, 'alt', 'videoPoster');
       content.append(img);
+      recoverImage(img, media, data, 'large', () => {
+        if (!content.querySelector('.viewer-note')) content.append(el('p', 'viewer-note', msg('previewError')));
+      }, () => content.querySelector('.viewer-note')?.remove());
     }
     if (media.kind === 'video' && !media.src) content.append(el('p', 'viewer-note', msg('noVideoSource')));
     content.append(link(msg(media.kind === 'video' ? 'playOriginal' : 'openOriginal'), data.url));
@@ -365,13 +373,12 @@ import { createI18n } from './i18n.js';
       const src = media.kind === 'image' ? adapter.imageURL(media.src, 'small') : media.poster;
       if (src) {
         const img = el('img');
-        img.loading = 'lazy'; img.src = src;
+        img.loading = 'lazy';
         if (media.alt) img.alt = media.alt;
         else translatedAttribute(img, 'alt', media.kind === 'video' ? 'videoThumb' : 'imageAlt');
-        img.addEventListener('error', () => {
-          img.hidden = true;
-          thumbnail.append(el('span', 'fallback', msg('previewError')));
-        }, { once: true });
+        recoverImage(img, media, data, 'small', () => {
+          if (!thumbnail.querySelector('.fallback')) thumbnail.append(el('span', 'fallback', msg('previewError')));
+        }, () => thumbnail.querySelector('.fallback')?.remove());
         thumbnail.append(img);
       } else thumbnail.append(el('span', 'fallback', msg('video')));
       if (media.kind === 'video') thumbnail.append(el('span', 'play', '▶'));
@@ -379,6 +386,15 @@ import { createI18n } from './i18n.js';
       mediaRow.append(thumbnail);
     }
     return mediaRow;
+  }
+
+  function recoverImage(img, media, data, size, onFailure, onSuccess) {
+    const original = media.kind === 'image' ? media.src : media.poster;
+    const preferred = media.kind === 'image' ? adapter.imageURL(original, size) : original;
+    imageLoader.load(img, {
+      key: `${media.ownerId || data.id}:${media.key}:${size}`,
+      sources: [preferred, original], onFailure, onSuccess,
+    });
   }
 
   function renderQuote(data) {
@@ -502,6 +518,7 @@ import { createI18n } from './i18n.js';
 
   function resetFeed() {
     closeViewer();
+    imageLoader.clear();
     entries.clear(); list.replaceChildren(); viewport.scrollTop = 0;
     finishLoading();
     $('.empty').hidden = false;
@@ -509,7 +526,7 @@ import { createI18n } from './i18n.js';
   }
 
   function finishLoading(message) {
-    loading = false; clearTimeout(loadTimer);
+    loading = false; loadRun = null; clearTimeout(loadTimer); clearTimeout(loadStepTimer);
     more.disabled = false; text(more, 'more');
     if (message?.key) text(status, message.key, message.params);
     else if (message) { status._readerMessage = null; status.textContent = message; }
@@ -607,6 +624,7 @@ import { createI18n } from './i18n.js';
       text(status, null); text($('.count'), null); return;
     }
     const snapshot = adapter.snapshot(state);
+    if (loading && snapshot.messageKey) finishLoading(msg(snapshot.messageKey));
     if (!snapshot.searchMatches) {
       text(status, 'waitSearch'); return;
     }
@@ -642,10 +660,18 @@ import { createI18n } from './i18n.js';
           if (body) updateBody(body, previous);
           if (!data.truncated) list.querySelector(`[data-id="${data.id}"] .full-text-note`)?.remove();
         }
-        if (data.grid) {
-          const combined = new Map();
-          for (const media of [...previous.media, ...data.media]) combined.set(`${media.kind}:${media.kind === 'image' ? media.src : media.poster || ''}`, media);
-          data.media = Array.from(combined.values());
+        if (!data.person) {
+          data.media = mergeMedia(previous.media, data.media);
+          const quoteChanged = previous.quoteId && data.quoteId && previous.quoteId !== data.quoteId;
+          data.quoteMedia = mergeMedia(quoteChanged ? [] : previous.quoteMedia, data.quoteMedia);
+          if (!quoteChanged) {
+            data.quote ||= previous.quote;
+            data.quoteId ||= previous.quoteId;
+            data.quoteURL ||= previous.quoteURL;
+          }
+          if (data.quoteId) data.quoteMedia = data.quoteMedia.map((media) => ({ ...media, ownerId: data.quoteId }));
+          previous.mediaState = data.media.length ? 'partial' : 'unknown';
+          previous.quoteMediaState = data.quoteMedia.length ? 'partial' : 'unknown';
         }
         if (!data.grid && authorSignature(previous) !== authorSignature(data)) {
           list.querySelector(`[data-id="${data.id}"] .author`)?.replaceWith(renderAuthor(data));
@@ -676,6 +702,7 @@ import { createI18n } from './i18n.js';
             else if (newQuote) item.querySelector('.meta').before(newQuote);
           }
           previous.quote = data.quote;
+          previous.quoteId = data.quoteId;
           previous.quoteMedia = data.quoteMedia;
           previous.quoteURL = data.quoteURL;
         }
@@ -688,14 +715,19 @@ import { createI18n } from './i18n.js';
     }
     $('.empty').hidden = entries.size > 0;
     text($('.count'), 'count', { count: entries.size });
-    if (added) finishLoading(msg('collected', { count: entries.size, label: tabMessage(state) }));
-    else if (!entries.size && message) {
+    if (added) {
+      const collected = msg('collected', { count: entries.size, label: tabMessage(state) });
+      if (loadRun) { loadRun.received = true; text(status, collected.key, collected.params); }
+      else finishLoading(collected);
+    } else if (!entries.size && message) {
       text($('.empty'), message.key, message.params);
       finishLoading(message); more.hidden = true;
     } else if (!entries.size) text(status, state.kind === 'search' ? 'searchWaiting' : 'homeDataWaiting');
     if (entries.size >= 1000) {
+      finishLoading();
       more.disabled = true; text(status, 'limit');
     }
+    imageLoader.prune();
     measureText();
   }
 
@@ -719,12 +751,24 @@ import { createI18n } from './i18n.js';
     if (loading || pending || routePending || !active || entries.size >= 1000) return;
     loading = true; more.disabled = true; text(more, 'loading');
     text(status, pageState().kind === 'search' ? 'loadSearch' : 'loadHome');
-    // Keep the source page's layout and scroll it without moving the Reader viewport.
-    adapter.loadMore();
+    const run = loadRun = { key: pageState().key, tab: nativeTabs().find((tab) => tab.selected)?.key, steps: 0, received: false };
     loadTimer = setTimeout(() => {
       finishLoading(msg('noNewContent'));
     }, 10000);
-    schedule();
+    function step() {
+      if (loadRun !== run) return;
+      if (!enabled || !active || pending || routePending || pageState().key !== run.key || nativeTabs().find((tab) => tab.selected)?.key !== run.tab) {
+        finishLoading(); return;
+      }
+      if (run.received) { finishLoading(); return; }
+      if (run.steps >= 12) { finishLoading(msg('noNewContent')); return; }
+      // Overlapping viewport-sized steps give native lazy media time to mount before moving on.
+      const result = adapter.loadMore();
+      run.steps++;
+      schedule();
+      loadStepTimer = setTimeout(step, result.atEnd ? 1000 : 500);
+    }
+    step();
   }
 
   function setEnabled(value) {

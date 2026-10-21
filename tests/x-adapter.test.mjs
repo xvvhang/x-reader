@@ -51,6 +51,88 @@ test('separates parent and quoted media into normalized groups', () => {
   assert.equal(post.quoteURL, 'https://x.com/bob/status/456');
 });
 
+test('extracts only scoped background photos, excluding cards, avatars, emoji and video posters', () => {
+  const html = fixture.replace('<div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/example.jpg" alt="Example"></div>', `
+    <a href="/alice/status/123/photo/1"><div style="background-image: url('https://pbs.twimg.com/media/background.jpg')"></div></a>
+    <div style="background-image: url(https://pbs.twimg.com/media/unrelated.jpg)"></div>
+    <div data-testid="card.wrapper"><img src="https://pbs.twimg.com/media/card.jpg"></div>
+    <div data-testid="Tweet-User-Avatar"><img src="https://pbs.twimg.com/media/avatar.jpg"></div>
+    <div data-testid="tweetText"><img src="https://pbs.twimg.com/media/emoji.jpg" alt="🙂"></div>
+    <div data-testid="videoPlayer"><div style="background-image: url(https://pbs.twimg.com/media/poster.jpg)"></div></div>`);
+  const post = setup({ html }).adapter.snapshot().items[0];
+  assert.deepEqual(post.media.filter((media) => media.kind === 'image').map((media) => media.src), ['https://pbs.twimg.com/media/background.jpg']);
+  assert.equal(post.media.find((media) => media.kind === 'video').poster, 'https://pbs.twimg.com/media/poster.jpg');
+});
+
+test('uses post identities to classify nested clickable media and reject same-post quote lookalikes', () => {
+  const html = fixture.replace('<div role="link" tabindex="0">', '<div role="link" tabindex="0" data-href="/bob/status/456">')
+    .replace('Second line</div></div>', `Second line</div><a role="link" tabindex="0" href="/bob/status/456/photo/1"><img src="https://pbs.twimg.com/media/quoted.jpg"></a></div>`)
+    .replace('<div data-testid="tweetPhoto">', '<div role="link" tabindex="0" data-href="/alice/status/123/photo/1" data-testid="tweetPhoto">');
+  const post = setup({ html }).adapter.snapshot().items[0];
+  assert.equal(post.media.length, 1);
+  assert.equal(post.quoteMedia.length, 1);
+  assert.equal(post.quoteId, '456');
+  assert.equal(post.quoteMedia[0].ownerId, '456');
+  assert.equal(post.media[0].ownerId, '123');
+});
+
+test('treats absent media as unknown and observed media as partial rather than authoritative emptiness', () => {
+  const h = setup();
+  assert.equal(h.adapter.snapshot().items[0].mediaState, 'partial');
+  h.document.querySelector('[data-testid="tweetPhoto"]').remove();
+  assert.equal(h.adapter.snapshot().items[0].mediaState, 'unknown');
+});
+
+test('keeps media in an explicit quote frame separate before its identity link mounts', () => {
+  const html = fixture.replace('<div role="link" tabindex="0"><a href="/bob/status/456">Quoted post</a><div data-testid="tweetText">Quoted text<br>Second line</div></div>', '<div data-testid="quoteTweet"><div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/pending.jpg"></div></div>');
+  const h = setup({ html });
+  const first = h.adapter.snapshot().items[0];
+  assert.equal(first.media.length, 1);
+  assert.equal(first.quoteMedia.length, 1);
+  assert.equal(first.quoteMedia[0].ownerId, null);
+  h.document.querySelector('[data-testid="quoteTweet"]').setAttribute('data-href', '/bob/status/456');
+  const second = h.adapter.snapshot().items[0];
+  assert.equal(second.media.length, 1);
+  assert.equal(second.quoteMedia[0].ownerId, '456');
+});
+
+test('extracts background-only photo search links and rejects unsafe background sources', () => {
+  const html = `<html><body><main data-testid="primaryColumn">
+    <a href="/alice/status/123/photo/1" style="background-image: url(https://pbs.twimg.com/media/background.jpg)"></a>
+    <a href="/alice/status/123/photo/2"><div style="background-image: url(https://example.com/tracker.jpg)"></div></a>
+  </main></body></html>`;
+  const snapshot = setup({ html, pathname: '/search', search: '?q=photos&f=image' }).adapter.snapshot();
+  assert.equal(snapshot.items.length, 1);
+  assert.equal(snapshot.items[0].media[0].src, 'https://pbs.twimg.com/media/background.jpg');
+  assert.equal(snapshot.items[0].media[0].order, 1);
+});
+
+test('deduplicates image and background representations and keeps explicit photo order', () => {
+  const html = fixture.replace('<div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/example.jpg" alt="Example"></div>', `
+    <a href="/alice/status/123/photo/2"><img src="https://pbs.twimg.com/media/second.jpg"></a>
+    <a href="/alice/status/123/photo/1"><div style="background-image: url(https://pbs.twimg.com/media/example?format=webp&amp;name=small)"></div><img src="https://pbs.twimg.com/media/example.jpg" alt="Example"></a>`);
+  const media = setup({ html }).adapter.snapshot().items[0].media;
+  assert.equal(media.length, 2);
+  assert.equal(media[0].order, 1);
+  assert.equal(media[0].alt, 'Example');
+  assert.equal(media[1].order, 2);
+});
+
+test('source scrolling uses overlapping steps and does not scroll backwards or beyond the end', () => {
+  const h = setup();
+  h.window.innerHeight = 800;
+  Object.defineProperty(h.document.documentElement, 'scrollHeight', { value: 2000 });
+  h.adapter.loadMore();
+  assert.equal(h.scrolls.at(-1)[0].top, 642);
+  h.window.scrollY = 1000;
+  assert.deepEqual(h.adapter.loadMore(), { moved: true, atEnd: true });
+  assert.equal(h.scrolls.at(-1)[0].top, 1200);
+  h.window.scrollY = 1500;
+  const count = h.scrolls.length;
+  assert.deepEqual(h.adapter.loadMore(), { moved: false, atEnd: true });
+  assert.equal(h.scrolls.length, count);
+});
+
 test('recognizes source truncation independently of quoted-post truncation', () => {
   const quoted = fixture.replace('Second line</div>', 'Second line</div><a data-testid="tweet-text-show-more-link">Show more</a>');
   assert.equal(setup({ html: quoted }).adapter.snapshot().items[0].truncated, false);
@@ -181,6 +263,7 @@ test('observes native changes and releases observers and listeners on cleanup', 
   const stop = adapter.observe(() => notifications++);
   assert.ok(observers[0].options.attributeFilter.includes('srcset'));
   assert.ok(observers[0].options.attributeFilter.includes('sizes'));
+  assert.ok(observers[0].options.attributeFilter.includes('style'));
   observers[0].callback(); observers[1].callback();
   h.window.dispatchEvent(new h.window.Event('popstate'));
   assert.equal(notifications, 3);
