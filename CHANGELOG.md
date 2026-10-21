@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2
+
+- Synchronize delayed native post text without resetting expanded state.
+- Attempt on-demand full-text loading from public post pages when X truncates timeline text, with an original-post fallback when unavailable.
+
 ## 1.0.1
 
 - Recognize additional post-image markup and responsive image sources.

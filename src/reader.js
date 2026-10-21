@@ -395,6 +395,7 @@ import { createI18n } from './i18n.js';
     const content = el('div');
     if (data.context) content.append(el('div', 'context', data.context));
     const text = el('p', 'text clamped');
+    text._readerData = data;
     for (const token of data.tokens) {
       text.append(token.href ? link(token.text, token.href) : document.createTextNode(token.text));
     }
@@ -423,11 +424,29 @@ import { createI18n } from './i18n.js';
       return node;
     };
     if (data.tokens.length) {
-      const expand = button(msg('expand'), (node) => {
+      const expand = button(msg('expand'), async (node) => {
         const collapsed = text.classList.toggle('clamped');
         textMessage(node, collapsed ? 'expand' : 'collapse');
         node.setAttribute('aria-expanded', String(!collapsed));
         measureText();
+        if (!collapsed && data.truncated) {
+          node.disabled = true;
+          textMessage(node, 'loading');
+          const result = await adapter.fullText(data);
+          if (!item.isConnected) return;
+          node.disabled = false;
+          textMessage(node, 'collapse');
+          if (result && result.tokens.map((token) => token.text).join('').length > data.tokens.map((token) => token.text).join('').length) {
+            data.tokens = result.tokens;
+            data.truncated = false;
+            data.fullText = true;
+            updateBody(text, data);
+            item.querySelector('.full-text-note')?.remove();
+          } else if (data.truncated && !item.querySelector('.full-text-note')) {
+            meta.after(link(msg('fullTextUnavailable'), data.url, 'full-text-note'));
+          }
+          measureText();
+        }
       });
       expand.setAttribute('aria-expanded', 'false');
       // Measure after mounting; show Expand only for truncation and recheck on resize.
@@ -439,6 +458,11 @@ import { createI18n } from './i18n.js';
     if (data.card) meta.append(link(msg('card'), data.url));
     content.append(meta); item.append(content);
     return item;
+  }
+
+  function updateBody(node, data) {
+    node.replaceChildren();
+    for (const token of data.tokens) node.append(token.href ? link(token.text, token.href) : document.createTextNode(token.text));
   }
 
   function renderMediaEntry(data) {
@@ -609,6 +633,15 @@ import { createI18n } from './i18n.js';
     for (const data of snapshot.items) {
       const previous = entries.get(data.id);
       if (previous) {
+        // Native text can arrive after the initial snapshot. Keep an expanded body mounted,
+        // and never replace fetched full text with the timeline's shorter preview.
+        if (!data.person && !previous.fullText && (JSON.stringify(previous.tokens) !== JSON.stringify(data.tokens) || previous.truncated !== data.truncated)) {
+          previous.tokens = data.tokens;
+          previous.truncated = data.truncated;
+          const body = list.querySelector(`[data-id="${data.id}"] .text`);
+          if (body) updateBody(body, previous);
+          if (!data.truncated) list.querySelector(`[data-id="${data.id}"] .full-text-note`)?.remove();
+        }
         if (data.grid) {
           const combined = new Map();
           for (const media of [...previous.media, ...data.media]) combined.set(`${media.kind}:${media.kind === 'image' ? media.src : media.poster || ''}`, media);
@@ -674,7 +707,7 @@ import { createI18n } from './i18n.js';
       // Zero height or missing layout is not truncation; keep Collapse available after expansion.
       const clamped = text.classList.contains('clamped');
       const truncated = text.clientHeight > 0 && text.scrollHeight > text.clientHeight + 1;
-      expand.hidden = clamped && !truncated;
+      expand.hidden = clamped && !truncated && !text._readerData?.truncated;
     }
   }
 

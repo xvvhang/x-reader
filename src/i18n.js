@@ -22,6 +22,7 @@ const messages = {
   enlargeImage: ['放大查看图片 {index}', 'View image {index}'], enlargeVideo: ['放大查看视频 {index}', 'View video {index}'],
   previewError: ['预览不可用', 'Preview unavailable'], video: ['视频', 'Video'], original: ['原帖', 'Original post'], originalLink: ['原帖 ↗', 'Original post ↗'],
   expand: ['展开', 'Expand'], collapse: ['收起', 'Collapse'], card: ['链接卡片 ↗', 'Link card ↗'],
+  fullTextUnavailable: ['未能获取全文，请打开原帖查看 ↗', 'Full text unavailable. Open the original post ↗'],
   mediaWaiting: ['媒体尚未加载，打开原帖查看 ↗', 'Media not loaded. Open original post ↗'],
   switching: ['正在切换到 {label}…', 'Switching to {label}…'],
   switchTimeout: ['时间线仍未更新。可再次点击目标标签重试，或返回原版检查网络 / 登录状态。', 'The timeline has not updated. Select the tab to retry, or switch to X to check your connection and sign-in.'],

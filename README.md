@@ -22,6 +22,7 @@ The first public version is **1.0.0**. Earlier development builds used higher ve
 - **Independent home feed:** home and search navigation, timeline tabs, and a compact numbered list. Uses X's blue accent and follows the system light or dark theme.
 - Reads the available native home tabs, preserving For you, Following, and custom list entries.
 - Displays posts in collection order with five-line previews, author details, timestamps, engagement counts, and original-post links. The expand control appears only when text is actually truncated and is rechecked after viewport or font changes.
+- For posts truncated by X itself, Expand attempts to retrieve the full text from the public original-post page without account credentials. If that page does not provide the text, an original-post link is shown instead. Later native text updates are also synchronized without collapsing expanded posts.
 - Author details include an avatar, display name, `@username`, and a verification badge only when one exists in the original author's header. Delayed avatar and badge updates are synchronized.
 - Image and video thumbnails appear below the text. Images load lazily and open in an in-page viewer. Close it with Escape, the close button, or a click on the backdrop. Closing stops video playback.
 - Videos can play in the viewer when the source page provides a reusable `video.twimg.com` URL. Blob or streaming-only sources fall back to a poster and an original-post playback link. Delayed posters and source URLs are synchronized.
@@ -39,9 +40,9 @@ The first public version is **1.0.0**. Earlier development builds used higher ve
 
 ## How it works and limitations
 
-The native X home or search page remains underneath Reader, visually hidden but retaining its layout and data loading. The script reads already-loaded content and rebuilds it using safe text nodes and links. It does not copy native HTML, call private APIs, or upload data. Home tabs trigger their native counterparts. Loading more scrolls the underlying page without changing the Reader's scroll position.
+The native X home or search page remains underneath Reader, visually hidden but retaining its layout and data loading. The script reads already-loaded content and rebuilds it using safe text nodes and links. Expanding a source-truncated post additionally requests its public original-post HTML on demand, without account credentials. It does not copy native HTML into Reader, call private APIs, or upload data. Home tabs trigger their native counterparts. Loading more scrolls the underlying page without changing the Reader's scroll position.
 
-You must be signed in, and the native page must load successfully. Reader does not bypass search restrictions, access controls, or rate limits. X can change its DOM, advertisement markers, or virtual scrolling behavior, so extraction and pagination are not guaranteed to work indefinitely. Only loaded text is available; posts truncated by X must be opened in the original view. Engagement counts are snapshots taken during extraction.
+You must be signed in, and the native page must load successfully. Reader does not bypass search restrictions, access controls, or rate limits. X can change its DOM, advertisement markers, or virtual scrolling behavior, so extraction and pagination are not guaranteed to work indefinitely. Full-text expansion depends on the public post page supplying recognizable text; private, restricted, or otherwise unavailable posts must be opened in the original view. Engagement counts are snapshots taken during extraction.
 
 Switching to Origin restores the native page and the scroll position saved when Reader was activated. Only `/home` and `/search` use the independent interface; other pages keep their native layout. Colors follow the system theme.
 
