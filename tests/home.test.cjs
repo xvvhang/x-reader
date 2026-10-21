@@ -75,6 +75,71 @@ test('extracts, safely renders, and deduplicates home posts without modifying na
   assert.equal(h.ui.querySelector('.viewer').hidden, true);
 });
 
+test('collects photo-link and unwrapped media alongside standard photos without including avatars or video posters', () => {
+  const content = tweet('1').replace('</article>', `
+    <a href="/alice/status/1/photo/2"><img srcset="https://pbs.twimg.com/media/second.jpg 1x"></a>
+    <img src="https://pbs.twimg.com/media/third.jpg">
+    <div data-testid="videoPlayer"><img src="https://pbs.twimg.com/media/poster.jpg"></div>
+  </article>`);
+  const h = setup({ content });
+  const images = h.ui.querySelectorAll('.media .thumbnail:not(:has(.play)) img');
+  assert.equal(images.length, 3);
+  assert.match(images[1].src, /second\.jpg/);
+  assert.match(images[2].src, /third\.jpg/);
+});
+
+test('adds images when responsive sources arrive later without resetting expanded text or Reader scroll', () => {
+  const h = setup({ content: tweet('1').replace('src="https://pbs.twimg.com/media/example.jpg"', '') });
+  const body = h.ui.querySelector('.text');
+  body.classList.remove('clamped');
+  h.ui.querySelector('.viewport').scrollTop = 123;
+  assert.equal(h.ui.querySelectorAll('.media img').length, 0);
+  h.feed.querySelector('[data-testid="tweetPhoto"] img').setAttribute('srcset', 'https://pbs.twimg.com/media/late.jpg 1x');
+  h.notify();
+  assert.match(h.ui.querySelector('.media img').src, /late\.jpg/);
+  assert.equal(h.ui.querySelector('.text'), body);
+  assert.equal(body.classList.contains('clamped'), false);
+  assert.equal(h.ui.querySelector('.viewport').scrollTop, 123);
+});
+
+test('keeps a quoted post image separate from the quoting post image, including identical image URLs', () => {
+  const h = setup({ content: tweet('1').replace('</article>', `
+    <div role="link" tabindex="0">
+      <a href="/bob/status/99">Quoted post</a>
+      <div data-testid="tweetText">Bob's photo</div>
+      <div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/example.jpg"></div>
+    </div></article>`) });
+  const item = h.ui.querySelector('.item');
+  assert.equal(item.querySelectorAll(':scope > div > .media .thumbnail').length, 1);
+  assert.equal(item.querySelectorAll('.quote .thumbnail').length, 1);
+  assert.match(item.querySelector('.quote').textContent, /Bob's photo/);
+  item.querySelector('.quote .thumbnail').click();
+  assert.equal(h.ui.querySelector('.viewer-content a').href, 'https://x.com/bob/status/99');
+});
+
+test('keeps delayed quote-only media separate when parent media is added and removed', () => {
+  const h = setup({ content: tweet('1').replace('</article>', `
+    <div role="link" tabindex="0"><a href="/bob/status/99">Quoted post</a>
+      <div data-testid="tweetPhoto"><img></div>
+      <div data-testid="videoPlayer"><video poster="https://pbs.twimg.com/media/quote-video.jpg" src="https://video.twimg.com/quote.mp4"></video></div>
+    </div></article>`) });
+  const body = h.ui.querySelector('.text');
+  body.classList.remove('clamped');
+  h.feed.querySelector('[role="link"] img').setAttribute('src', 'https://pbs.twimg.com/media/quote.jpg');
+  h.notify();
+  assert.equal(h.ui.querySelectorAll('.quote .thumbnail').length, 2);
+  h.feed.querySelector('[data-testid="tweetPhoto"]').remove();
+  h.notify();
+  assert.equal(h.ui.querySelectorAll('.quote .thumbnail').length, 2);
+  assert.equal(h.ui.querySelectorAll('.item > div > .media').length, 0);
+  h.feed.querySelector('article').insertAdjacentHTML('afterbegin', '<div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/new.jpg"></div>');
+  h.notify();
+  assert.equal(h.ui.querySelectorAll('.item > div > .media .thumbnail').length, 1);
+  assert.equal(h.ui.querySelectorAll('.quote .thumbnail').length, 2);
+  assert.equal(h.ui.querySelector('.text'), body);
+  assert.equal(body.classList.contains('clamped'), false);
+});
+
 test('excludes stale timeline data and restarts numbering after a tab switch', () => {
   const h = setup();
   h.ui.querySelectorAll('.tabs button')[1].click();

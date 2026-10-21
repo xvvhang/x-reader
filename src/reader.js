@@ -355,6 +355,39 @@ import { createI18n } from './i18n.js';
     return item;
   }
 
+  function renderMedia(data) {
+    const mediaRow = el('div', 'media');
+    for (const [index, media] of data.media.entries()) {
+      const thumbnail = el('button', 'thumbnail');
+      thumbnail.type = 'button';
+      translatedAttribute(thumbnail, 'aria-label', media.kind === 'video' ? 'enlargeVideo' : 'enlargeImage', { index: index + 1 });
+      thumbnail.setAttribute('aria-haspopup', 'dialog');
+      const src = media.kind === 'image' ? adapter.imageURL(media.src, 'small') : media.poster;
+      if (src) {
+        const img = el('img');
+        img.loading = 'lazy'; img.src = src;
+        if (media.alt) img.alt = media.alt;
+        else translatedAttribute(img, 'alt', media.kind === 'video' ? 'videoThumb' : 'imageAlt');
+        img.addEventListener('error', () => {
+          img.hidden = true;
+          thumbnail.append(el('span', 'fallback', msg('previewError')));
+        }, { once: true });
+        thumbnail.append(img);
+      } else thumbnail.append(el('span', 'fallback', msg('video')));
+      if (media.kind === 'video') thumbnail.append(el('span', 'play', '▶'));
+      thumbnail.addEventListener('click', () => openViewer(media, data, thumbnail));
+      mediaRow.append(thumbnail);
+    }
+    return mediaRow;
+  }
+
+  function renderQuote(data) {
+    if (!data.quote && !data.quoteMedia?.length) return null;
+    const quote = el('blockquote', 'quote', data.quote || '');
+    if (data.quoteMedia?.length) quote.append(renderMedia({ ...data, media: data.quoteMedia, url: data.quoteURL || data.url }));
+    return quote;
+  }
+
   function renderEntry(data, index) {
     const item = el('li', 'item');
     item.dataset.id = data.id;
@@ -367,31 +400,7 @@ import { createI18n } from './i18n.js';
     }
     if (!data.tokens.length) text.append(link(msg(data.media.some((media) => media.kind === 'video') ? 'videoPost' : data.media.length ? 'imagePost' : 'quotePost'), data.url));
     content.append(text);
-    if (data.media.length) {
-      const mediaRow = el('div', 'media');
-      for (const [index, media] of data.media.entries()) {
-        const thumbnail = el('button', 'thumbnail');
-        thumbnail.type = 'button';
-        translatedAttribute(thumbnail, 'aria-label', media.kind === 'video' ? 'enlargeVideo' : 'enlargeImage', { index: index + 1 });
-        thumbnail.setAttribute('aria-haspopup', 'dialog');
-        const src = media.kind === 'image' ? adapter.imageURL(media.src, 'small') : media.poster;
-        if (src) {
-          const img = el('img');
-          img.loading = 'lazy'; img.src = src;
-          if (media.alt) img.alt = media.alt;
-          else translatedAttribute(img, 'alt', media.kind === 'video' ? 'videoThumb' : 'imageAlt');
-          img.addEventListener('error', () => {
-            img.hidden = true;
-            thumbnail.append(el('span', 'fallback', msg('previewError')));
-          }, { once: true });
-          thumbnail.append(img);
-        } else thumbnail.append(el('span', 'fallback', msg('video')));
-        if (media.kind === 'video') thumbnail.append(el('span', 'play', '▶'));
-        thumbnail.addEventListener('click', () => openViewer(media, data, thumbnail));
-        mediaRow.append(thumbnail);
-      }
-      content.append(mediaRow);
-    }
+    if (data.media.length) content.append(renderMedia(data));
     const meta = el('div', 'meta');
     meta.append(renderAuthor(data));
     const time = link(data.time || msg('original'), data.url);
@@ -425,10 +434,8 @@ import { createI18n } from './i18n.js';
       expand.hidden = true;
       text._readerExpand = expand;
     }
-    if (data.quote) {
-      const quote = el('blockquote', 'quote', data.quote);
-      content.append(quote);
-    }
+    const quote = renderQuote(data);
+    if (quote) content.append(quote);
     if (data.card) meta.append(link(msg('card'), data.url));
     content.append(meta); item.append(content);
     return item;
@@ -617,13 +624,27 @@ import { createI18n } from './i18n.js';
           if (item?.classList.contains('media-card')) {
             item.replaceWith(renderMediaEntry({ ...previous, media: data.media }));
           } else {
-            const oldRow = item?.querySelector('.media');
-            const newRow = renderEntry(data, 0).querySelector('.media');
+            const oldRow = item?.querySelector(':scope > div > .media');
+            const newRow = data.media.length ? renderMedia(data) : null;
             if (oldRow && newRow) oldRow.replaceWith(newRow);
             else if (oldRow) oldRow.remove();
             else if (newRow) item?.querySelector('.text').after(newRow);
           }
           previous.media = data.media;
+        }
+        if (!data.person && (previous.quote !== data.quote || previous.quoteURL !== data.quoteURL ||
+          JSON.stringify(previous.quoteMedia) !== JSON.stringify(data.quoteMedia))) {
+          const item = list.querySelector(`[data-id="${data.id}"]`);
+          if (item?.classList.contains('item')) {
+            const oldQuote = item.querySelector('.quote');
+            const newQuote = renderQuote(data);
+            if (oldQuote && newQuote) oldQuote.replaceWith(newQuote);
+            else if (oldQuote) oldQuote.remove();
+            else if (newQuote) item.querySelector('.meta').before(newQuote);
+          }
+          previous.quote = data.quote;
+          previous.quoteMedia = data.quoteMedia;
+          previous.quoteURL = data.quoteURL;
         }
         continue;
       }
