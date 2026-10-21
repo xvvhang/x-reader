@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Reader
 // @namespace    https://local.invalid/x-reader
-// @version      1.0.1
+// @version      1.0.2
 // @license      MIT
 // @description  An independent, compact X home and search interface with filters, media previews, and people search.
 // @match        https://x.com/*
@@ -59,6 +59,8 @@ SOFTWARE.
     badge: ['[data-testid="icon-verified"]', '[aria-label="Verified account"], [aria-label="Verified Account"], [aria-label="已认证账号"], [aria-label="认证账号"]'],
     avatars: ['[data-testid="Tweet-User-Avatar"] img, [data-testid^="UserAvatar-Container"] img'],
     text: ['[data-testid="tweetText"]'],
+    detailText: ['[data-testid="tweetText"]', '[dir="auto"].whitespace-pre-wrap'],
+    showMore: ['[data-testid="tweet-text-show-more-link"]'],
     photos: ['[data-testid="tweetPhoto"] img, a[href*="/status/"][href*="/photo/"] img, img[src*="//pbs.twimg.com/media/"], img[srcset*="//pbs.twimg.com/media/"]'],
     videoContainers: ['[data-testid="videoPlayer"], [data-testid="videoComponent"]'],
     backgroundImages: ['[style*="background-image"]'],
@@ -180,17 +182,8 @@ SOFTWARE.
       const texts = all("text", article);
       const body = texts.find((node) => !closest("quoteScope", node)) || null;
       const quote = texts.find((node) => node !== body);
-      const tokens = [];
-      function walk(node) {
-        if (node.nodeType === 3) tokens.push({ text: node.textContent });
-        else if (node.nodeType === 1) {
-          if (node.tagName === "BR") tokens.push({ text: "\n" });
-          else if (node.tagName === "IMG") tokens.push({ text: node.getAttribute("alt") || "" });
-          else if (node.tagName === "A") tokens.push({ text: node.textContent, href: url(node.getAttribute("href")) });
-          else node.childNodes.forEach(walk);
-        }
-      }
-      body?.childNodes.forEach(walk);
+      const tokens = textTokens(body);
+      const truncated = all("showMore", article).some((node) => !closest("quoteScope", node));
       const media = [];
       const quoteMedia = [];
       let quoteRoot = closest("quoteScope", quote);
@@ -236,6 +229,7 @@ SOFTWARE.
         datetime: time?.getAttribute("datetime") || "",
         time: time?.textContent || "",
         tokens,
+        truncated,
         quote: readableText(quote),
         quoteMedia,
         quoteURL: quoteHref ? url(quoteHref) : null,
@@ -244,6 +238,44 @@ SOFTWARE.
         context: one("context", article)?.textContent || "",
         card: Boolean(one("card", article))
       };
+    }
+    function textTokens(body) {
+      const tokens = [];
+      function walk(node) {
+        if (node.nodeType === 3) tokens.push({ text: node.textContent });
+        else if (node.nodeType === 1) {
+          if (node.tagName === "BR") tokens.push({ text: "\n" });
+          else if (node.tagName === "IMG") tokens.push({ text: node.getAttribute("alt") || "" });
+          else if (node.tagName === "A") tokens.push({ text: readableText(node), href: url(node.getAttribute("href")) });
+          else if (!["SCRIPT", "STYLE", "BUTTON"].includes(node.tagName)) node.childNodes.forEach(walk);
+        }
+      }
+      body?.childNodes.forEach(walk);
+      return tokens;
+    }
+    async function fullText(post) {
+      const href = url(post.url);
+      if (!href || new URL(href).origin !== location2.origin || !/^\/[\w]+\/status\/\d+\/?$/.test(new URL(href).pathname) || new URL(href).pathname.split("/")[3] !== post.id) return null;
+      const controller = new window2.AbortController();
+      const timer = window2.setTimeout(() => controller.abort(), 1e4);
+      try {
+        const response = await window2.fetch(href, { credentials: "omit", signal: controller.signal });
+        if (!response.ok || response.url && (new URL(response.url).origin !== location2.origin || new URL(response.url).pathname !== new URL(href).pathname)) return null;
+        const detail = new window2.DOMParser().parseFromString(await response.text(), "text/html");
+        for (const article of detail.querySelectorAll("article")) {
+          const identity = all("statusLinks", article).some((node) => node.closest("article") === article && !closest("quoteScope", node) && url(node.getAttribute("href"))?.split("?")[0] === href);
+          if (!identity) continue;
+          const body = all("detailText", article).find((node) => node.closest("article") === article && !closest("quoteScope", node));
+          if (!body || all("showMore", article).some((node) => !closest("quoteScope", node)) || body.querySelector("button")) return null;
+          const tokens = textTokens(body);
+          return tokens.length ? { tokens } : null;
+        }
+        return null;
+      } catch {
+        return null;
+      } finally {
+        window2.clearTimeout(timer);
+      }
     }
     function extractPerson(cell) {
       const links = all("links", cell).filter((node) => {
@@ -358,6 +390,7 @@ SOFTWARE.
       detectLanguage,
       getTabs,
       snapshot,
+      fullText,
       installReaderStyles,
       observe,
       filters: SEARCH_FILTERS,
@@ -450,6 +483,7 @@ SOFTWARE.
     expand: ["展开", "Expand"],
     collapse: ["收起", "Collapse"],
     card: ["链接卡片 ↗", "Link card ↗"],
+    fullTextUnavailable: ["未能获取全文，请打开原帖查看 ↗", "Full text unavailable. Open the original post ↗"],
     mediaWaiting: ["媒体尚未加载，打开原帖查看 ↗", "Media not loaded. Open original post ↗"],
     switching: ["正在切换到 {label}…", "Switching to {label}…"],
     switchTimeout: ["时间线仍未更新。可再次点击目标标签重试，或返回原版检查网络 / 登录状态。", "The timeline has not updated. Select the tab to retry, or switch to X to check your connection and sign-in."],
@@ -683,6 +717,7 @@ SOFTWARE.
       const content = el("div");
       if (data.context) content.append(el("div", "context", data.context));
       const text2 = el("p", "text clamped");
+      text2._readerData = data;
       for (const token of data.tokens) {
         text2.append(token.href ? link(token.text, token.href) : document.createTextNode(token.text));
       }
@@ -711,11 +746,29 @@ SOFTWARE.
         return node;
       };
       if (data.tokens.length) {
-        const expand = button(msg("expand"), (node) => {
+        const expand = button(msg("expand"), async (node) => {
           const collapsed = text2.classList.toggle("clamped");
           textMessage(node, collapsed ? "expand" : "collapse");
           node.setAttribute("aria-expanded", String(!collapsed));
           measureText();
+          if (!collapsed && data.truncated) {
+            node.disabled = true;
+            textMessage(node, "loading");
+            const result = await adapter.fullText(data);
+            if (!item.isConnected) return;
+            node.disabled = false;
+            textMessage(node, "collapse");
+            if (result && result.tokens.map((token) => token.text).join("").length > data.tokens.map((token) => token.text).join("").length) {
+              data.tokens = result.tokens;
+              data.truncated = false;
+              data.fullText = true;
+              updateBody(text2, data);
+              item.querySelector(".full-text-note")?.remove();
+            } else if (data.truncated && !item.querySelector(".full-text-note")) {
+              meta.after(link(msg("fullTextUnavailable"), data.url, "full-text-note"));
+            }
+            measureText();
+          }
         });
         expand.setAttribute("aria-expanded", "false");
         expand.hidden = true;
@@ -727,6 +780,9 @@ SOFTWARE.
       content.append(meta);
       item.append(content);
       return item;
+    }, updateBody = function(node, data) {
+      node.replaceChildren();
+      for (const token of data.tokens) node.append(token.href ? link(token.text, token.href) : document.createTextNode(token.text));
     }, renderMediaEntry = function(data) {
       const kind = pageState().filter === "video" ? "video" : "image";
       const media = data.media.filter((entry) => entry.kind === kind);
@@ -899,6 +955,13 @@ SOFTWARE.
       for (const data of snapshot.items) {
         const previous = entries.get(data.id);
         if (previous) {
+          if (!data.person && !previous.fullText && (JSON.stringify(previous.tokens) !== JSON.stringify(data.tokens) || previous.truncated !== data.truncated)) {
+            previous.tokens = data.tokens;
+            previous.truncated = data.truncated;
+            const body = list.querySelector(`[data-id="${data.id}"] .text`);
+            if (body) updateBody(body, previous);
+            if (!data.truncated) list.querySelector(`[data-id="${data.id}"] .full-text-note`)?.remove();
+          }
           if (data.grid) {
             const combined = /* @__PURE__ */ new Map();
             for (const media of [...previous.media, ...data.media]) combined.set(`${media.kind}:${media.kind === "image" ? media.src : media.poster || ""}`, media);
@@ -961,7 +1024,7 @@ SOFTWARE.
         if (!expand) continue;
         const clamped = text2.classList.contains("clamped");
         const truncated = text2.clientHeight > 0 && text2.scrollHeight > text2.clientHeight + 1;
-        expand.hidden = clamped && !truncated;
+        expand.hidden = clamped && !truncated && !text2._readerData?.truncated;
       }
     }, schedule = function() {
       if (!frame) frame = requestAnimationFrame(refresh);

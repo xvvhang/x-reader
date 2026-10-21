@@ -18,6 +18,8 @@ export const X_SELECTORS = Object.freeze({
   badge: ['[data-testid="icon-verified"]', '[aria-label="Verified account"], [aria-label="Verified Account"], [aria-label="已认证账号"], [aria-label="认证账号"]'],
   avatars: ['[data-testid="Tweet-User-Avatar"] img, [data-testid^="UserAvatar-Container"] img'],
   text: ['[data-testid="tweetText"]'],
+  detailText: ['[data-testid="tweetText"]', '[dir="auto"].whitespace-pre-wrap'],
+  showMore: ['[data-testid="tweet-text-show-more-link"]'],
   photos: ['[data-testid="tweetPhoto"] img, a[href*="/status/"][href*="/photo/"] img, img[src*="//pbs.twimg.com/media/"], img[srcset*="//pbs.twimg.com/media/"]'],
   videoContainers: ['[data-testid="videoPlayer"], [data-testid="videoComponent"]'],
   backgroundImages: ['[style*="background-image"]'],
@@ -130,17 +132,8 @@ export function createXAdapter({ document, window, location, MutationObserver: O
     const texts = all('text', article);
     const body = texts.find((node) => !closest('quoteScope', node)) || null;
     const quote = texts.find((node) => node !== body);
-    const tokens = [];
-    function walk(node) {
-      if (node.nodeType === 3) tokens.push({ text: node.textContent });
-      else if (node.nodeType === 1) {
-        if (node.tagName === 'BR') tokens.push({ text: '\n' });
-        else if (node.tagName === 'IMG') tokens.push({ text: node.getAttribute('alt') || '' });
-        else if (node.tagName === 'A') tokens.push({ text: node.textContent, href: url(node.getAttribute('href')) });
-        else node.childNodes.forEach(walk);
-      }
-    }
-    body?.childNodes.forEach(walk);
+    const tokens = textTokens(body);
+    const truncated = all('showMore', article).some((node) => !closest('quoteScope', node));
     const media = [];
     const quoteMedia = [];
     let quoteRoot = closest('quoteScope', quote);
@@ -179,8 +172,47 @@ export function createXAdapter({ document, window, location, MutationObserver: O
     }
     const quoteHref = quoteRoot?.getAttribute('href') || one('statusLinks', quoteRoot)?.getAttribute('href');
     return { id, url: href, ...extractAuthor(article, author, one('links', author)), datetime: time?.getAttribute('datetime') || '', time: time?.textContent || '',
-      tokens, quote: readableText(quote), quoteMedia, quoteURL: quoteHref ? url(quoteHref) : null,
+      tokens, truncated, quote: readableText(quote), quoteMedia, quoteURL: quoteHref ? url(quoteHref) : null,
       media, metrics, context: one('context', article)?.textContent || '', card: Boolean(one('card', article)) };
+  }
+  function textTokens(body) {
+    const tokens = [];
+    function walk(node) {
+      if (node.nodeType === 3) tokens.push({ text: node.textContent });
+      else if (node.nodeType === 1) {
+        if (node.tagName === 'BR') tokens.push({ text: '\n' });
+        else if (node.tagName === 'IMG') tokens.push({ text: node.getAttribute('alt') || '' });
+        else if (node.tagName === 'A') tokens.push({ text: readableText(node), href: url(node.getAttribute('href')) });
+        else if (!['SCRIPT', 'STYLE', 'BUTTON'].includes(node.tagName)) node.childNodes.forEach(walk);
+      }
+    }
+    body?.childNodes.forEach(walk);
+    return tokens;
+  }
+  async function fullText(post) {
+    const href = url(post.url);
+    if (!href || new URL(href).origin !== location.origin || !/^\/[\w]+\/status\/\d+\/?$/.test(new URL(href).pathname) ||
+      new URL(href).pathname.split('/')[3] !== post.id) return null;
+    const controller = new window.AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 10000);
+    try {
+      // On demand only: request the public post page, never private APIs or account credentials.
+      const response = await window.fetch(href, { credentials: 'omit', signal: controller.signal });
+      if (!response.ok || (response.url && (new URL(response.url).origin !== location.origin ||
+        new URL(response.url).pathname !== new URL(href).pathname))) return null;
+      const detail = new window.DOMParser().parseFromString(await response.text(), 'text/html');
+      for (const article of detail.querySelectorAll('article')) {
+        const identity = all('statusLinks', article).some((node) => node.closest('article') === article &&
+          !closest('quoteScope', node) && url(node.getAttribute('href'))?.split('?')[0] === href);
+        if (!identity) continue;
+        const body = all('detailText', article).find((node) => node.closest('article') === article && !closest('quoteScope', node));
+        if (!body || all('showMore', article).some((node) => !closest('quoteScope', node)) || body.querySelector('button')) return null;
+        const tokens = textTokens(body);
+        return tokens.length ? { tokens } : null;
+      }
+      return null;
+    } catch { return null; }
+    finally { window.clearTimeout(timer); }
   }
   function extractPerson(cell) {
     const links = all('links', cell).filter((node) => {
@@ -263,7 +295,7 @@ export function createXAdapter({ document, window, location, MutationObserver: O
     };
   }
   return {
-    pageState, detectLanguage, getTabs, snapshot, installReaderStyles, observe, filters: SEARCH_FILTERS,
+    pageState, detectLanguage, getTabs, snapshot, fullText, installReaderStyles, observe, filters: SEARCH_FILTERS,
     setReaderActive(active) { document.documentElement.toggleAttribute('data-x-reader-home', active); },
     activateTab(key) {
       const tabs = getTabs();

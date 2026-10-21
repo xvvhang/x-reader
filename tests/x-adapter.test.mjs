@@ -51,6 +51,32 @@ test('separates parent and quoted media into normalized groups', () => {
   assert.equal(post.quoteURL, 'https://x.com/bob/status/456');
 });
 
+test('recognizes source truncation independently of quoted-post truncation', () => {
+  const quoted = fixture.replace('Second line</div>', 'Second line</div><a data-testid="tweet-text-show-more-link">Show more</a>');
+  assert.equal(setup({ html: quoted }).adapter.snapshot().items[0].truncated, false);
+  const parent = fixture.replace('</article>', '<a data-testid="tweet-text-show-more-link">Show more</a></article>');
+  assert.equal(setup({ html: parent }).adapter.snapshot().items[0].truncated, true);
+});
+
+test('full-text loading validates post identity and excludes quoted text and unsafe links', async () => {
+  const h = setup();
+  h.window.AbortController = AbortController;
+  h.window.setTimeout = () => 1;
+  h.window.clearTimeout = () => {};
+  let html = `<article><div role="link" tabindex="0"><article><div dir="auto" class="whitespace-pre-wrap">Quoted text</div><a href="/bob/status/456">Timestamp</a></article></div>
+    <div dir="auto" class="whitespace-pre-wrap">Full body<br><a href="javascript:alert(1)">unsafe</a><img alt="🙂"></div><a href="/alice/status/123">Timestamp</a></article>`;
+  let requests = 0;
+  h.window.fetch = async () => { requests++; return { ok: true, text: async () => html }; };
+  const post = { id: '123', url: 'https://x.com/alice/status/123' };
+  const result = await h.adapter.fullText(post);
+  assert.equal(result.tokens.map((token) => token.text).join(''), 'Full body\nunsafe🙂');
+  assert.equal(result.tokens.find((token) => token.text === 'unsafe').href, null);
+  html = html.replace('/alice/status/123', '/alice/status/999');
+  assert.equal(await h.adapter.fullText(post), null);
+  assert.equal(await h.adapter.fullText({ ...post, url: 'https://example.com/alice/status/123' }), null);
+  assert.equal(requests, 2);
+});
+
 test('uses ordered primary-column and article fallbacks after native markup changes', () => {
   const html = fixture.replace('data-testid="primaryColumn"', 'role="main"').replace('data-testid="tweet"', 'role="article"');
   assert.equal(setup({ html }).adapter.snapshot().items[0].id, '123');

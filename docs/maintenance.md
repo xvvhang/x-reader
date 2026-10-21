@@ -24,6 +24,7 @@ Create an adapter with `createXAdapter({ document, window, location })`. Tests m
 | `detectLanguage()` | Detects the source interface language independently of post content. |
 | `getTabs()` | Returns plain `{ key, index, label, selected }` objects, never native tab nodes. |
 | `snapshot(state)` | Returns normalized entries, opaque source IDs, a source signature, native tabs, health, a message key, and query readiness. |
+| `fullText(post)` | On demand, requests same-origin public post HTML without credentials and returns safe text tokens for the matching post, or null. |
 | `activateTab(key)` | Finds the current native tab and clicks it; returns false if it no longer exists. |
 | `loadMore()` | Scrolls the native page to request more content. |
 | `scrollPosition()` / `restoreScroll(position)` | Reads or restores source-page scrolling, independently of Reader scrolling. |

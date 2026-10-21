@@ -17,7 +17,7 @@ function tweet(id, text = 'Hello reader') {
   </article>`;
 }
 
-function setup({ pathname = '/home', search = '', lang = 'zh-CN', content = tweet('1') + tweet('2', '第二条 &lt;script&gt;alert(1)&lt;/script&gt;') } = {}) {
+function setup({ pathname = '/home', search = '', lang = 'zh-CN', fetch, content = tweet('1') + tweet('2', '第二条 &lt;script&gt;alert(1)&lt;/script&gt;') } = {}) {
   const { window, document } = parseHTML(`<html lang="${lang}"><head></head><body><div id="react-root">
     <main data-testid="primaryColumn"><div role="tablist">
       <button role="tab" aria-selected="true">For you</button>
@@ -30,6 +30,10 @@ function setup({ pathname = '/home', search = '', lang = 'zh-CN', content = twee
   const assignments = [];
   const storage = new Map();
   window.scrollY = 42;
+  window.fetch = fetch;
+  window.AbortController = AbortController;
+  window.setTimeout = () => 1;
+  window.clearTimeout = () => {};
   window.scrollTo = (...args) => scrolls.push(args);
   const context = vm.createContext({
     window, document, Node: window.Node, Element: window.Element, URL, URLSearchParams, console,
@@ -138,6 +142,52 @@ test('keeps delayed quote-only media separate when parent media is added and rem
   assert.equal(h.ui.querySelectorAll('.quote .thumbnail').length, 2);
   assert.equal(h.ui.querySelector('.text'), body);
   assert.equal(body.classList.contains('clamped'), false);
+});
+
+test('synchronizes delayed native body text without collapsing it or changing scroll position', () => {
+  const h = setup({ content: tweet('1', 'Short preview') });
+  const body = h.ui.querySelector('.text');
+  body.classList.remove('clamped');
+  h.ui.querySelector('.viewport').scrollTop = 123;
+  h.feed.querySelector('[data-testid="tweetText"]').textContent = 'Full text arriving later';
+  h.notify();
+  assert.equal(body.textContent, 'Full text arriving later');
+  assert.equal(body.classList.contains('clamped'), false);
+  assert.equal(h.ui.querySelector('.viewport').scrollTop, 123);
+});
+
+test('fetches source-truncated text only on Expand and retains the full text across snapshots', async () => {
+  let requests = 0;
+  const h = setup({ content: tweet('1', 'Short preview…').replace('</article>', '<a data-testid="tweet-text-show-more-link" href="/alice/status/1">Show more</a></article>'),
+    fetch: async (href, options) => {
+      requests++;
+      assert.equal(href, 'https://x.com/alice/status/1');
+      assert.equal(options.credentials, 'omit');
+      return { ok: true, text: async () => `<article><div dir="auto" class="whitespace-pre-wrap">Full text with a safe <a href="https://example.com">link</a><script>alert(1)</script></div><a href="/alice/status/1">Timestamp</a></article>` };
+    } });
+  assert.equal(requests, 0);
+  const expand = h.ui.querySelector('.meta button');
+  assert.equal(expand.hidden, false);
+  expand.click();
+  await new Promise(setImmediate);
+  const body = h.ui.querySelector('.text');
+  assert.equal(requests, 1);
+  assert.equal(body.textContent, 'Full text with a safe link');
+  assert.equal(body.querySelector('script'), null);
+  h.notify();
+  assert.equal(body.textContent, 'Full text with a safe link');
+  expand.click(); expand.click();
+  await new Promise(setImmediate);
+  assert.equal(requests, 1);
+});
+
+test('provides an original-post fallback when the public detail page cannot supply full text', async () => {
+  const h = setup({ content: tweet('1', 'Short preview…').replace('</article>', '<a data-testid="tweet-text-show-more-link">Show more</a></article>'),
+    fetch: async () => ({ ok: true, text: async () => '<html><body>Log in</body></html>' }) });
+  h.ui.querySelector('.meta button').click();
+  await new Promise(setImmediate);
+  assert.match(h.ui.querySelector('.full-text-note').textContent, /全文/);
+  assert.equal(h.ui.querySelector('.text').textContent, 'Short preview…');
 });
 
 test('excludes stale timeline data and restarts numbering after a tab switch', () => {
