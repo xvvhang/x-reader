@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.4
+
+- Add persistent Image-free and Compact switches at the top right of Reader, with translated labels and accessible switch states.
+- Replace media previews and avatars in Image-free mode without discarding collected media; use text rows for media search until images are restored.
+- Show loaded post bodies and media-grid captions unfolded when Compact is off, retaining an explicit full-text action for source-truncated posts.
+- Preserve reading state and in-flight full-text requests across image-mode changes.
+
 ## 1.0.3
 
 - Retain collected media across partial DOM snapshots and native-node remounts; deduplicate image renditions and preserve explicit photo ordering.

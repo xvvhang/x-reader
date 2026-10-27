@@ -17,7 +17,7 @@ function tweet(id, text = 'Hello reader') {
   </article>`;
 }
 
-function setup({ pathname = '/home', search = '', lang = 'zh-CN', fetch, content = tweet('1') + tweet('2', '第二条 &lt;script&gt;alert(1)&lt;/script&gt;') } = {}) {
+function setup({ pathname = '/home', search = '', lang = 'zh-CN', fetch, storage = new Map(), content = tweet('1') + tweet('2', '第二条 &lt;script&gt;alert(1)&lt;/script&gt;') } = {}) {
   const { window, document } = parseHTML(`<html lang="${lang}"><head></head><body><div id="react-root">
     <main data-testid="primaryColumn"><div role="tablist">
       <button role="tab" aria-selected="true">For you</button>
@@ -28,7 +28,6 @@ function setup({ pathname = '/home', search = '', lang = 'zh-CN', fetch, content
   const observers = [];
   const scrolls = [];
   const assignments = [];
-  const storage = new Map();
   const timers = new Map();
   let clock = 0;
   let timerId = 0;
@@ -71,7 +70,7 @@ function setup({ pathname = '/home', search = '', lang = 'zh-CN', fetch, content
   };
   flush();
   return {
-    window, document, scrolls, assignments, notify, flush, advance, timers, location: context.location,
+    window, document, scrolls, assignments, notify, flush, advance, timers, storage, location: context.location,
     ui: document.querySelector('#x-reader-app').shadowRoot,
     nativeTabs: document.querySelectorAll('[role="tab"]'),
     feed: document.querySelector('#feed'),
@@ -95,6 +94,140 @@ test('extracts, safely renders, and deduplicates home posts without modifying na
   assert.match(h.ui.querySelector('.viewer-content img').src, /name=large/);
   h.ui.querySelector('.viewer-close').click();
   assert.equal(h.ui.querySelector('.viewer').hidden, true);
+});
+
+test('offers independent accessible image-free and compact switches at the right of the header', () => {
+  const h = setup();
+  const controls = h.ui.querySelector('.top .view-controls');
+  assert.equal(controls.getAttribute('role'), 'group');
+  assert.equal(controls.querySelectorAll('[role="switch"]').length, 2);
+  const imageFree = controls.querySelector('[data-setting="imageFree"]');
+  const compact = controls.querySelector('[data-setting="compact"]');
+  assert.equal(imageFree.getAttribute('aria-checked'), 'false');
+  assert.equal(imageFree.getAttribute('aria-label'), '无图模式');
+  assert.equal(compact.getAttribute('aria-checked'), 'true');
+  assert.equal(compact.type, 'button');
+  const css = h.ui.querySelector('style').textContent;
+  assert.match(css.match(/\.view-controls \{([^}]+)\}/)[1], /margin-left: auto/);
+  assert.match(css, /prefers-reduced-motion: reduce/);
+});
+
+test('image-free mode removes media previews and avatars without losing text, expansion, input or media caches', () => {
+  const h = setup({ content: tweet('1').replace('</article>', '<div role="link" tabindex="0"><a href="/bob/status/99">Quoted</a><div data-testid="tweetText">Quoted text</div><div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/quoted.jpg"></div></div></article>') });
+  h.ui.querySelector('.text')._readerExpand.click();
+  h.ui.querySelector('.search input').value = 'unsent query';
+  h.ui.querySelector('.viewport').scrollTop = 123;
+  const imageFree = h.ui.querySelector('[data-setting="imageFree"]');
+  imageFree.click();
+  assert.equal(h.ui.querySelectorAll('img, video, .thumbnail').length, 0);
+  assert.equal(h.ui.querySelectorAll('.media a').length, 2);
+  assert.match(h.ui.querySelector('.quote').textContent, /Quoted text/);
+  assert.equal(h.ui.querySelector('.text').classList.contains('clamped'), false);
+  assert.equal(h.ui.querySelector('.search input').value, 'unsent query');
+  assert.equal(h.ui.querySelector('.viewport').scrollTop, 123);
+  h.feed.querySelector('[data-testid="tweetPhoto"]').remove(); h.notify();
+  h.feed.insertAdjacentHTML('beforeend', tweet('2')); h.notify();
+  assert.equal(h.ui.querySelector('img'), null);
+  imageFree.click();
+  assert.equal(h.ui.querySelectorAll('.thumbnail').length, 3);
+  assert.equal(h.ui.querySelector('.text').classList.contains('clamped'), false);
+  assert.equal(h.ui.querySelector('.search input').value, 'unsent query');
+});
+
+test('image-free mode closes the viewer and cancels pending image retries', () => {
+  const h = setup({ content: tweet('1') });
+  h.ui.querySelector('.thumbnail').click();
+  const img = h.ui.querySelector('.viewer img');
+  img.dispatchEvent(new h.window.Event('error'));
+  const src = img.src;
+  h.ui.querySelector('[data-setting="imageFree"]').click();
+  h.advance(2000);
+  assert.equal(h.ui.querySelector('.viewer').hidden, true);
+  assert.equal(h.ui.querySelector('img'), null);
+  assert.equal(img.src, src);
+  assert.equal(h.timers.size, 0);
+});
+
+test('normal mode unfolds existing and future posts while compact mode restores five-line previews', () => {
+  const h = setup();
+  const compact = h.ui.querySelector('[data-setting="compact"]');
+  h.ui.querySelector('.viewport').scrollTop = 123;
+  compact.click();
+  assert.equal(compact.getAttribute('aria-checked'), 'false');
+  for (const body of h.ui.querySelectorAll('.text')) {
+    assert.equal(body.classList.contains('clamped'), false);
+    assert.equal(body._readerExpand.hidden, true);
+  }
+  h.feed.insertAdjacentHTML('beforeend', tweet('3')); h.notify();
+  assert.equal(h.ui.querySelector('[data-id="3"] .text').classList.contains('clamped'), false);
+  assert.equal(h.ui.querySelector('.viewport').scrollTop, 123);
+  compact.click();
+  const body = h.ui.querySelector('.text');
+  Object.defineProperty(body, 'clientHeight', { value: 100 });
+  Object.defineProperty(body, 'scrollHeight', { value: 150 });
+  h.window.dispatchEvent(new h.window.Event('resize'));
+  assert.equal(body.classList.contains('clamped'), true);
+  assert.equal(body._readerExpand.hidden, false);
+  assert.equal(body._readerExpand.textContent, '展开');
+});
+
+test('persists view preferences across reloads and applies them to media search without changing the filter', () => {
+  const storage = new Map();
+  const first = setup({ storage });
+  first.ui.querySelector('[data-setting="imageFree"]').click();
+  first.ui.querySelector('[data-setting="compact"]').click();
+  assert.deepEqual(JSON.parse(JSON.stringify(storage.get('x-reader-view-preferences-v1'))), { imageFree: true, compact: false });
+  const h = setup({ storage, pathname: '/search', search: '?q=photo&f=image' });
+  assert.equal(h.ui.querySelector('.list').dataset.layout, 'feed');
+  assert.equal(h.ui.querySelector('img'), null);
+  assert.equal(h.ui.querySelector('.text').classList.contains('clamped'), false);
+  assert.equal(h.ui.querySelector('.tabs [aria-selected="true"]').textContent, '图片');
+  h.ui.querySelector('[data-setting="imageFree"]').click();
+  assert.equal(h.ui.querySelector('.list').dataset.layout, 'image');
+  assert.equal(h.ui.querySelectorAll('.media-card').length, 2);
+  assert.equal(h.assignments.length, 0);
+});
+
+test('translates the switches at runtime without resetting their state', () => {
+  const h = setup();
+  h.ui.querySelector('[data-setting="imageFree"]').click();
+  h.ui.querySelector('[data-setting="compact"]').click();
+  h.document.documentElement.lang = 'en'; h.notify();
+  const imageFree = h.ui.querySelector('[data-setting="imageFree"]');
+  assert.equal(imageFree.getAttribute('aria-label'), 'Image-free');
+  assert.match(imageFree.textContent, /Image-free/);
+  assert.equal(imageFree.getAttribute('aria-checked'), 'true');
+  assert.equal(h.ui.querySelector('[data-setting="compact"]').getAttribute('aria-checked'), 'false');
+  assert.match(h.ui.querySelector('.media a').textContent, /Image 1/);
+});
+
+test('loads source-truncated text explicitly in normal mode and survives an image-mode change mid-request', async () => {
+  let resolveFetch;
+  let requests = 0;
+  const h = setup({ content: tweet('1', 'Short preview…').replace('</article>', '<a data-testid="tweet-text-show-more-link">Show more</a></article>'),
+    fetch: () => { requests++; return new Promise((resolve) => { resolveFetch = resolve; }); } });
+  h.ui.querySelector('[data-setting="compact"]').click();
+  assert.equal(requests, 0);
+  const expand = h.ui.querySelector('.text')._readerExpand;
+  assert.equal(expand.textContent, '加载全文');
+  assert.equal(expand.hidden, false);
+  expand.click();
+  h.ui.querySelector('[data-setting="imageFree"]').click();
+  assert.equal(h.ui.querySelector('.text')._readerExpand.disabled, true);
+  resolveFetch({ ok: true, text: async () => '<article><a href="/alice/status/1">Timestamp</a><div data-testid="tweetText">The complete full text arriving after the view has changed.</div></article>' });
+  await new Promise(setImmediate);
+  assert.equal(requests, 1);
+  assert.match(h.ui.querySelector('.text').textContent, /complete full text/);
+  assert.equal(h.ui.querySelector('.text').classList.contains('clamped'), false);
+  assert.equal(h.ui.querySelector('.text')._readerExpand.hidden, true);
+});
+
+test('view switches remain usable when preference storage fails', () => {
+  const h = setup({ storage: { get() { throw new Error('Storage unavailable'); }, set() { throw new Error('Storage unavailable'); } } });
+  h.ui.querySelector('[data-setting="imageFree"]').click();
+  h.ui.querySelector('[data-setting="compact"]').click();
+  assert.equal(h.ui.querySelector('img'), null);
+  assert.equal(h.ui.querySelector('.text').classList.contains('clamped'), false);
 });
 
 test('collects photo-link and unwrapped media alongside standard photos without including avatars or video posters', () => {

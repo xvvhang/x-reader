@@ -12,6 +12,8 @@
 
 `src/reader.js` owns the Shadow DOM interface, collection state, deduplication, preview controls, and rendering. It must not query the original document for X elements or receive native nodes from the adapter. Generic DOM construction and keyboard handling remain in Reader.
 
+Reader persists display preferences separately from the existing enabled-mode key, under `x-reader-view-preferences-v1` (`imageFree: false`, `compact: true` by default). Image-free rendering must not instantiate Reader media or avatar images, but must keep normalized media in the collection. It does not suppress the native page's network activity. Rebuilding presentation for image-mode changes preserves per-entry expansion and shares in-flight full-text requests; callbacks must verify the current entry identity before updating a newly rendered row. Normal mode unfolds loaded text without initiating bulk full-text requests. Neither preference resets the collection or navigates native X.
+
 `src/i18n.js` translates UI message descriptors. It does not inspect native markup or translate user content. The adapter reports language as `zh` or `en`.
 
 `src/media.js` owns URL-based media identities and incremental merging, without DOM access. `src/image-loader.js` owns generic image recovery, sharing retry budgets across rerenders and cleaning up detached image jobs. Neither module inspects native X markup.

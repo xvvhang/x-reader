@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Reader
 // @namespace    https://local.invalid/x-reader
-// @version      1.0.3
+// @version      1.0.4
 // @license      MIT
 // @description  An independent, compact X home and search interface with filters, media previews, and people search.
 // @match        https://x.com/*
@@ -535,6 +535,12 @@ SOFTWARE.
     foot: ["只显示当前账号已加载的内容 · 摘要为原文截取，并非 AI 总结 · 互动请打开原帖", "Only content loaded for your account · Previews are excerpts, not AI summaries · Open the original post to interact"],
     mode: ["阅读模式切换", "Reading mode"],
     modeChoice: ["选择页面版本", "Choose a view"],
+    viewOptions: ["阅读显示设置", "Reader display options"],
+    imageFree: ["无图模式", "Image-free"],
+    compact: ["紧凑模式", "Compact"],
+    imageOriginal: ["图片 {index} ↗", "Image {index} ↗"],
+    videoOriginal: ["视频 {index} ↗", "Video {index} ↗"],
+    loadFullText: ["加载全文", "Load full text"],
     viewer: ["媒体查看器", "Media viewer"],
     close: ["关闭 ✕", "Close ✕"],
     top: ["热门", "Top"],
@@ -741,7 +747,7 @@ SOFTWARE.
       text($(".search-heading"), state.query ? "searchHeading" : "searchX", { query: state.query });
       translatedAttribute($(".tabs"), "aria-label", state.kind === "search" ? "searchTabs" : "homeTabs");
       translatedAttribute(list, "aria-label", state.filter === "user" ? "peopleResults" : state.kind === "search" ? "results" : "posts");
-      list.dataset.layout = state.kind === "search" && ["image", "video"].includes(state.filter) ? state.filter : "feed";
+      list.dataset.layout = resultLayout(state);
       for (const nav of shadow.querySelectorAll(".nav a")) {
         if (nav.getAttribute("href") === `/${state.kind}`) nav.setAttribute("aria-current", "page");
         else nav.removeAttribute("aria-current");
@@ -763,6 +769,7 @@ SOFTWARE.
       if (viewerTrigger?.isConnected) viewerTrigger.focus();
       viewerTrigger = null;
     }, openViewer = function(media, data, trigger) {
+      if (imageFree) return;
       closeViewer();
       viewerTrigger = trigger;
       const content = $(".viewer-content");
@@ -808,7 +815,7 @@ SOFTWARE.
     }, renderAuthor = function(data) {
       const author = link("", data.authorURL || data.url, "author");
       const fallback = () => el("span", "avatar avatar-fallback", Array.from(data.author)[0] || "?");
-      if (data.avatar) {
+      if (data.avatar && !imageFree) {
         const img = el("img", "avatar");
         img.src = data.avatar;
         img.alt = "";
@@ -844,6 +851,10 @@ SOFTWARE.
       return item;
     }, renderMedia = function(data) {
       const mediaRow = el("div", "media");
+      if (imageFree) {
+        for (const [index, media] of data.media.entries()) mediaRow.append(link(msg(media.kind === "image" ? "imageOriginal" : "videoOriginal", { index: index + 1 }), data.url));
+        return mediaRow;
+      }
       for (const [index, media] of data.media.entries()) {
         const thumbnail = el("button", "thumbnail");
         thumbnail.type = "button";
@@ -885,7 +896,8 @@ SOFTWARE.
       item.append(el("span", "rank", `${index}.`));
       const content = el("div");
       if (data.context) content.append(el("div", "context", data.context));
-      const text2 = el("p", "text clamped");
+      data.expanded ??= !compact;
+      const text2 = el("p", data.expanded ? "text" : "text clamped");
       text2._readerData = data;
       for (const token of data.tokens) {
         text2.append(token.href ? link(token.text, token.href) : document.createTextNode(token.text));
@@ -907,48 +919,54 @@ SOFTWARE.
         meta.append(metrics);
       }
       meta.append(link(msg("originalLink"), data.url));
-      const button = (label, handler) => {
-        const node = el("button", "", label);
-        node.type = "button";
-        node.addEventListener("click", () => handler(node));
-        meta.append(node);
-        return node;
-      };
-      if (data.tokens.length) {
-        const expand = button(msg("expand"), async (node) => {
-          const collapsed = text2.classList.toggle("clamped");
-          textMessage(node, collapsed ? "expand" : "collapse");
-          node.setAttribute("aria-expanded", String(!collapsed));
-          measureText();
-          if (!collapsed && data.truncated) {
-            node.disabled = true;
-            textMessage(node, "loading");
-            const result = await adapter.fullText(data);
-            if (!item.isConnected) return;
-            node.disabled = false;
-            textMessage(node, "collapse");
-            if (result && result.tokens.map((token) => token.text).join("").length > data.tokens.map((token) => token.text).join("").length) {
-              data.tokens = result.tokens;
-              data.truncated = false;
-              data.fullText = true;
-              updateBody(text2, data);
-              item.querySelector(".full-text-note")?.remove();
-            } else if (data.truncated && !item.querySelector(".full-text-note")) {
-              meta.after(link(msg("fullTextUnavailable"), data.url, "full-text-note"));
-            }
-            measureText();
-          }
-        });
-        expand.setAttribute("aria-expanded", "false");
-        expand.hidden = true;
-        text2._readerExpand = expand;
-      }
       const quote = renderQuote(data);
       if (quote) content.append(quote);
       if (data.card) meta.append(link(msg("card"), data.url));
       content.append(meta);
       item.append(content);
+      attachExpand(item, text2, data);
+      if (data.fullTextFailed && data.truncated) meta.after(link(msg("fullTextUnavailable"), data.url, "full-text-note"));
       return item;
+    }, attachExpand = function(item, body, data) {
+      if (body._readerExpand || !data.tokens.length) return;
+      const expand = el("button", "", msg("expand"));
+      expand.type = "button";
+      expand.hidden = true;
+      body._readerExpand = expand;
+      expand.addEventListener("click", () => {
+        if (compact) {
+          data.expanded = !body.classList.toggle("clamped");
+        } else {
+          data.expanded = true;
+          body.classList.remove("clamped");
+        }
+        if (data.expanded && data.truncated) fetchFullText(data);
+        measureText();
+      });
+      item.querySelector(".meta").append(expand);
+    }, fetchFullText = function(data) {
+      if (data.fullTextRequest) return;
+      data.fullTextRequest = adapter.fullText(data).then((result) => {
+        if (entries.get(data.id) !== data) return;
+        if (result && result.tokens.map((token) => token.text).join("").length > data.tokens.map((token) => token.text).join("").length) {
+          data.tokens = result.tokens;
+          data.truncated = false;
+          data.fullText = true;
+          data.fullTextFailed = false;
+        } else data.fullTextFailed = data.truncated;
+      }).catch(() => {
+        data.fullTextFailed = true;
+      }).finally(() => {
+        data.fullTextRequest = null;
+        if (entries.get(data.id) !== data) return;
+        const item = list.querySelector(`[data-id="${data.id}"]`);
+        const body = item?.querySelector(".text");
+        if (!body) return;
+        if (data.fullText) updateBody(body, data);
+        if (data.fullTextFailed && data.truncated && !item.querySelector(".full-text-note")) item.querySelector(".meta").after(link(msg("fullTextUnavailable"), data.url, "full-text-note"));
+        if (!data.truncated) item.querySelector(".full-text-note")?.remove();
+        measureText();
+      });
     }, updateBody = function(node, data) {
       node.replaceChildren();
       for (const token of data.tokens) node.append(token.href ? link(token.text, token.href) : document.createTextNode(token.text));
@@ -957,7 +975,7 @@ SOFTWARE.
       const media = data.media.filter((entry) => entry.kind === kind);
       const item = el("li", "media-card");
       item.dataset.id = data.id;
-      const thumbnails = media.length ? renderEntry({ ...data, media }, 0).querySelector(".media") : el("div", "media media-placeholder");
+      const thumbnails = media.length ? renderMedia({ ...data, media }) : el("div", "media media-placeholder");
       thumbnails.dataset.multiple = String(media.length > 1);
       thumbnails.dataset.count = String(media.length);
       if (!media.length) thumbnails.append(link(msg("mediaWaiting"), data.url));
@@ -982,6 +1000,35 @@ SOFTWARE.
       if (data.person) return renderPerson(data, index);
       if (["image", "video"].includes(list.dataset.layout)) return renderMediaEntry(data);
       return renderEntry(data, index);
+    }, resultLayout = function(state) {
+      return !imageFree && state.kind === "search" && ["image", "video"].includes(state.filter) ? state.filter : "feed";
+    }, syncPreferences = function() {
+      app.dataset.imageFree = String(imageFree);
+      app.dataset.compact = String(compact);
+      $('.view-switch[data-setting="imageFree"]').setAttribute("aria-checked", String(imageFree));
+      $('.view-switch[data-setting="compact"]').setAttribute("aria-checked", String(compact));
+    }, changePreference = function(setting) {
+      if (setting === "imageFree") {
+        imageFree = !imageFree;
+        closeViewer();
+        const position = viewport.scrollTop;
+        list.dataset.layout = resultLayout(pageState());
+        list.replaceChildren();
+        for (const [index, data] of Array.from(entries.values()).entries()) list.append(renderResult(data, index + 1));
+        imageLoader.prune();
+        viewport.scrollTop = position;
+      } else {
+        compact = !compact;
+        for (const data of entries.values()) data.expanded = !compact;
+        for (const body of list.querySelectorAll(".text")) body.classList.toggle("clamped", compact);
+      }
+      syncPreferences();
+      try {
+        GM_setValue(PREFERENCES_KEY, { imageFree, compact });
+      } catch {
+      }
+      measureText();
+      $(`.view-switch[data-setting="${setting}"]`).focus();
     }, resetFeed = function() {
       closeViewer();
       imageLoader.clear();
@@ -1132,7 +1179,10 @@ SOFTWARE.
             previous.tokens = data.tokens;
             previous.truncated = data.truncated;
             const body = list.querySelector(`[data-id="${data.id}"] .text`);
-            if (body) updateBody(body, previous);
+            if (body) {
+              updateBody(body, previous);
+              attachExpand(body.closest(".item"), body, previous);
+            }
             if (!data.truncated) list.querySelector(`[data-id="${data.id}"] .full-text-note`)?.remove();
           }
           if (!data.person) {
@@ -1213,7 +1263,11 @@ SOFTWARE.
         if (!expand) continue;
         const clamped = text2.classList.contains("clamped");
         const truncated = text2.clientHeight > 0 && text2.scrollHeight > text2.clientHeight + 1;
-        expand.hidden = clamped && !truncated && !text2._readerData?.truncated;
+        const data = text2._readerData;
+        expand.disabled = Boolean(data.fullTextRequest);
+        textMessage(expand, data.fullTextRequest ? "loading" : !compact ? "loadFullText" : clamped ? "expand" : "collapse");
+        expand.setAttribute("aria-expanded", String(!clamped));
+        expand.hidden = compact ? clamped && !truncated && !data.truncated : !data.truncated;
       }
     }, schedule = function() {
       if (!frame) frame = requestAnimationFrame(refresh);
@@ -1263,9 +1317,20 @@ SOFTWARE.
     const { msg, t, text, translatedAttribute } = i18n;
     const textMessage = text;
     const KEY = "x-reader-home-v3";
+    const PREFERENCES_KEY = "x-reader-view-preferences-v1";
     let enabled = true;
     try {
       enabled = GM_getValue(KEY, true) !== false;
+    } catch {
+    }
+    let imageFree = false;
+    let compact = true;
+    try {
+      const preferences = GM_getValue(PREFERENCES_KEY, {});
+      if (preferences && typeof preferences === "object") {
+        imageFree = preferences.imageFree === true;
+        compact = preferences.compact !== false;
+      }
     } catch {
     }
     const host = document.createElement("div");
@@ -1289,7 +1354,7 @@ SOFTWARE.
       button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
       .app { position: fixed; inset: 0; z-index: 2147483645; background: var(--surface); color: var(--ink); display: flex; flex-direction: column; }
       .masthead { background: var(--bg); border-bottom: 1px solid var(--line); flex: none; }
-      .top { max-width: 1200px; margin: auto; min-height: 40px; padding: 6px 18px; display: flex; gap: 18px; align-items: center; }
+      .top { max-width: 1200px; margin: auto; min-height: 40px; padding: 6px 18px; display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
       .brand { font-weight: 800; letter-spacing: -.5px; font-size: 16px; white-space: nowrap; }
       .mark { padding: 0 4px; margin-right: 6px; color: var(--link); }
       .nav { display: flex; gap: 12px; align-items: center; }
@@ -1297,6 +1362,15 @@ SOFTWARE.
       .search { display: flex; gap: 6px; margin-left: auto; }
       .search input { width: 190px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--ink); }
       .search button { border: 0; background: transparent; color: var(--link); font-size: 12px; white-space: nowrap; }
+      .view-controls { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+      .view-switch { display: inline-flex; align-items: center; gap: 6px; border: 0; padding: 4px 0;
+        background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
+      .switch-track { display: inline-block; position: relative; width: 28px; height: 16px; border-radius: 8px; background: var(--muted); }
+      .switch-track::before { content: ''; position: absolute; left: 2px; top: 2px; width: 12px; height: 12px;
+        border-radius: 50%; background: #fff; transition: transform 150ms ease; }
+      .view-switch[aria-checked="true"] .switch-track { background: var(--link); }
+      .view-switch[aria-checked="true"] .switch-track::before { transform: translateX(12px); }
+      .app[data-compact="false"] .caption { display: block; overflow: visible; -webkit-line-clamp: unset; }
       .viewport { overflow: auto; flex: 1; min-height: 0; overscroll-behavior: contain; }
       .paper { max-width: 1200px; margin: 0 auto; min-height: 100%; background: var(--bg); padding: 0 22px calc(88px + env(safe-area-inset-bottom, 0px)); }
       .feedbar { display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--line); padding: 12px 0 9px; }
@@ -1368,7 +1442,7 @@ SOFTWARE.
       .mode-tab { position: relative; z-index: 1; flex: 1; border: 0; padding: 0 10px; border-radius: 7px;
         background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; touch-action: manipulation; }
       .mode-tab[aria-pressed="true"] { color: var(--ink); font-weight: 600; }
-      @media (prefers-reduced-motion: reduce) { .segment-slider { transition: none; } }
+      @media (prefers-reduced-motion: reduce) { .segment-slider, .switch-track::before { transition: none; } }
       .viewer { position: fixed; inset: 0; z-index: 2147483647; background: #000d; color: #fff;
         display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 16px 24px; }
       .viewer-content { max-width: min(1200px, 100%); min-height: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
@@ -1384,6 +1458,8 @@ SOFTWARE.
         .top { padding: 7px 10px; gap: 12px; flex-wrap: wrap; }
         .search { order: 2; width: 100%; }
         .search input { width: 100%; min-width: 0; }
+        .view-controls { gap: 8px; }
+        .view-switch { font-size: 11px; }
         .paper { padding: 0 10px calc(88px + env(safe-area-inset-bottom, 0px)); }
         .item { grid-template-columns: 22px minmax(0, 1fr); }
         .text { font-size: 13px; }
@@ -1399,6 +1475,10 @@ SOFTWARE.
         <a class="brand" href="/home"><span class="mark">X</span>Reader</a>
         <nav class="nav" data-i18n-aria="mainNav"><a href="/home" aria-current="page" data-i18n="home"></a><a href="/search" data-i18n="search"></a></nav>
         <form class="search" role="search"><input name="q" type="search" data-i18n-placeholder="searchX" data-i18n-aria="searchX" required><button type="submit" data-i18n="search"></button></form>
+        <div class="view-controls" role="group" data-i18n-aria="viewOptions">
+          <button class="view-switch" data-setting="imageFree" type="button" role="switch" aria-checked="false" data-i18n-aria="imageFree"><span data-i18n="imageFree"></span><span class="switch-track" aria-hidden="true"></span></button>
+          <button class="view-switch" data-setting="compact" type="button" role="switch" aria-checked="true" data-i18n-aria="compact"><span data-i18n="compact"></span><span class="switch-track" aria-hidden="true"></span></button>
+        </div>
       </div></header>
       <div class="viewport"><main class="paper">
         <h1 class="search-heading" hidden></h1>
@@ -1492,6 +1572,7 @@ SOFTWARE.
       if (query) adapter.navigate(searchURL(query, pageState().kind === "search" ? pageState().filter : ""));
     });
     more.addEventListener("click", loadMore);
+    for (const toggle of shadow.querySelectorAll(".view-switch")) toggle.addEventListener("click", () => changePreference(toggle.dataset.setting));
     const intersection = new IntersectionObserver((events) => {
       if (events.some((event) => event.isIntersecting) && entries.size > 0) loadMore();
     }, { root: viewport, rootMargin: "0px 0px 300px 0px" });
@@ -1509,6 +1590,7 @@ SOFTWARE.
       }
     });
     if (typeof GM_registerMenuCommand === "function") GM_registerMenuCommand(t("menuToggle"), () => setEnabled(!enabled));
+    syncPreferences();
     schedule();
   }
 })();
