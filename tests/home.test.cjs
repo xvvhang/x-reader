@@ -201,17 +201,17 @@ test('translates the switches at runtime without resetting their state', () => {
   assert.match(h.ui.querySelector('.media a').textContent, /Image 1/);
 });
 
-test('loads source-truncated text explicitly in normal mode and survives an image-mode change mid-request', async () => {
+test('automatically loads source-truncated text in normal mode and survives an image-mode change mid-request', async () => {
   let resolveFetch;
   let requests = 0;
   const h = setup({ content: tweet('1', 'Short preview…').replace('</article>', '<a data-testid="tweet-text-show-more-link">Show more</a></article>'),
     fetch: () => { requests++; return new Promise((resolve) => { resolveFetch = resolve; }); } });
   h.ui.querySelector('[data-setting="compact"]').click();
-  assert.equal(requests, 0);
+  assert.equal(requests, 1);
   const expand = h.ui.querySelector('.text')._readerExpand;
-  assert.equal(expand.textContent, '加载全文');
+  assert.equal(expand.textContent, '正在加载…');
   assert.equal(expand.hidden, false);
-  expand.click();
+  assert.equal(expand.disabled, true);
   h.ui.querySelector('[data-setting="imageFree"]').click();
   assert.equal(h.ui.querySelector('.text')._readerExpand.disabled, true);
   resolveFetch({ ok: true, text: async () => '<article><a href="/alice/status/1">Timestamp</a><div data-testid="tweetText">The complete full text arriving after the view has changed.</div></article>' });
@@ -220,6 +220,32 @@ test('loads source-truncated text explicitly in normal mode and survives an imag
   assert.match(h.ui.querySelector('.text').textContent, /complete full text/);
   assert.equal(h.ui.querySelector('.text').classList.contains('clamped'), false);
   assert.equal(h.ui.querySelector('.text')._readerExpand.hidden, true);
+});
+
+test('saved normal mode automatically loads initial, future and late-truncated posts without duplicate requests', async () => {
+  const requests = [];
+  const truncated = (id) => tweet(id, 'Preview…').replace('</article>', '<a data-testid="tweet-text-show-more-link">Show more</a></article>');
+  const h = setup({ storage: new Map([['x-reader-view-preferences-v1', { compact: false }]]),
+    content: truncated('1') + tweet('2'), fetch: async (url) => {
+      requests.push(url);
+      return { ok: true, text: async () => '' };
+    } });
+  assert.equal(requests.length, 1);
+  h.notify();
+  assert.equal(requests.length, 1);
+  await new Promise(setImmediate);
+  h.notify();
+  assert.equal(requests.length, 1, 'failed automatic requests are not repeated on refresh');
+  h.feed.insertAdjacentHTML('beforeend', truncated('3'));
+  h.feed.querySelectorAll('article')[1].insertAdjacentHTML('beforeend', '<a data-testid="tweet-text-show-more-link">Show more</a>');
+  h.notify();
+  assert.equal(requests.length, 3);
+  await new Promise(setImmediate);
+  const body = h.ui.querySelector('[data-id="1"] .text');
+  assert.equal(body._readerExpand.disabled, false);
+  body._readerExpand.click();
+  assert.equal(requests.length, 4, 'manual retry remains available');
+  await new Promise(setImmediate);
 });
 
 test('view switches remain usable when preference storage fails', () => {

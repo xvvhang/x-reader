@@ -502,6 +502,8 @@ import { createImageLoader } from './image-loader.js';
       data.fullTextRequest = null;
       if (entries.get(data.id) !== data) return;
       const item = list.querySelector(`[data-id="${data.id}"]`);
+      const caption = item?.querySelector('.caption a');
+      if (caption && data.fullText) caption.textContent = data.tokens.map((token) => token.text).join('');
       const body = item?.querySelector('.text');
       if (!body) return;
       if (data.fullText) updateBody(body, data);
@@ -509,6 +511,13 @@ import { createImageLoader } from './image-loader.js';
       if (!data.truncated) item.querySelector('.full-text-note')?.remove();
       measureText();
     });
+  }
+
+  function loadExpandedFullText() {
+    if (compact) return;
+    for (const data of entries.values()) {
+      if (!data.person && data.truncated && !data.fullTextFailed) fetchFullText(data);
+    }
   }
 
   function updateBody(node, data) {
@@ -578,6 +587,7 @@ import { createImageLoader } from './image-loader.js';
       for (const body of list.querySelectorAll('.text')) body.classList.toggle('clamped', compact);
     }
     syncPreferences();
+    loadExpandedFullText();
     try { GM_setValue(PREFERENCES_KEY, { imageFree, compact }); } catch { /* Keep toggles usable without storage. */ }
     measureText();
     $(`.view-switch[data-setting="${setting}"]`).focus();
@@ -798,6 +808,7 @@ import { createImageLoader } from './image-loader.js';
       more.disabled = true; text(status, 'limit');
     }
     imageLoader.prune();
+    loadExpandedFullText();
     measureText();
   }
 

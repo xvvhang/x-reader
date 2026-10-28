@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Reader
 // @namespace    https://local.invalid/x-reader
-// @version      1.0.4
+// @version      1.0.5
 // @license      MIT
 // @description  An independent, compact X home and search interface with filters, media previews, and people search.
 // @match        https://x.com/*
@@ -960,6 +960,8 @@ SOFTWARE.
         data.fullTextRequest = null;
         if (entries.get(data.id) !== data) return;
         const item = list.querySelector(`[data-id="${data.id}"]`);
+        const caption = item?.querySelector(".caption a");
+        if (caption && data.fullText) caption.textContent = data.tokens.map((token) => token.text).join("");
         const body = item?.querySelector(".text");
         if (!body) return;
         if (data.fullText) updateBody(body, data);
@@ -967,6 +969,11 @@ SOFTWARE.
         if (!data.truncated) item.querySelector(".full-text-note")?.remove();
         measureText();
       });
+    }, loadExpandedFullText = function() {
+      if (compact) return;
+      for (const data of entries.values()) {
+        if (!data.person && data.truncated && !data.fullTextFailed) fetchFullText(data);
+      }
     }, updateBody = function(node, data) {
       node.replaceChildren();
       for (const token of data.tokens) node.append(token.href ? link(token.text, token.href) : document.createTextNode(token.text));
@@ -1023,6 +1030,7 @@ SOFTWARE.
         for (const body of list.querySelectorAll(".text")) body.classList.toggle("clamped", compact);
       }
       syncPreferences();
+      loadExpandedFullText();
       try {
         GM_setValue(PREFERENCES_KEY, { imageFree, compact });
       } catch {
@@ -1255,6 +1263,7 @@ SOFTWARE.
         text(status, "limit");
       }
       imageLoader.prune();
+      loadExpandedFullText();
       measureText();
     }, measureText = function() {
       if (!active) return;

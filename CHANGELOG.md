@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.5
+
+- Automatically load full text for source-truncated posts when Compact is off, including newly collected posts and delayed truncation markers.
+- Share in-flight requests across display changes and retain manual retry after a failed automatic request.
+
 ## 1.0.4
 
 - Add persistent Image-free and Compact switches at the top right of Reader, with translated labels and accessible switch states.
